@@ -1,0 +1,72 @@
+name: signet-live
+
+# The live network test from ROADMAP Phase 1. A GitHub runner has the
+# unrestricted internet access needed to reach a faucet and broadcast,
+# which the development container does not.
+#
+# Defaults to mutinynet (a public custom signet with 30-second blocks
+# and an automatable faucet). Coins are valueless and the wallet seeds
+# are deterministic and public — see swsigner/tests/test_interop.py.
+#
+# This file lives at the root of the standalone signer repo. Inside the
+# ERCs monorepo it sits under hardware-wallet/ and is therefore inert,
+# since GitHub only reads workflows from the repository root.
+
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: "mutinynet or signet"
+        default: mutinynet
+        type: choice
+        options: [mutinynet, signet]
+      sats:
+        description: "faucet amount in sats"
+        default: "100000"
+  push:
+    branches: [clavote-signer-main, main]
+    paths:
+      - ".github/workflows/signet-live.yml"
+      - "interop/**"
+      - "swsigner/**"
+
+jobs:
+  offline-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install interop dependencies
+        run: pip install --quiet embit python-bitcoinlib
+      - name: Unit suite (includes interop + consensus oracle)
+        run: python -m unittest discover -s swsigner/tests -t .
+      - name: Demo
+        run: python -m swsigner.demo
+      - name: Parser fuzzing (short)
+        run: python -m fuzz.fuzz_parsers --iterations 4000 --seed 1
+      - name: Verification-engine fuzzing (short)
+        run: python -m fuzz.fuzz_verify --iterations 150 --seed 1
+
+  live-network:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: offline-suite
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install interop dependencies
+        run: pip install --quiet embit python-bitcoinlib
+      - name: Wallet identity
+        run: |
+          python -m interop.signet_interop \
+            --network "${{ inputs.network || 'mutinynet' }}" setup
+      - name: Fund, verify, co-sign, broadcast, confirm
+        run: |
+          python -m interop.signet_interop \
+            --network "${{ inputs.network || 'mutinynet' }}" \
+            auto --yes --sats "${{ inputs.sats || '100000' }}"
