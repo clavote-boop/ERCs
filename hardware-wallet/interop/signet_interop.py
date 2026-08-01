@@ -51,28 +51,65 @@ from swsigner.tests.test_interop import (                            # noqa: E40
 
 NETWORKS = {
     "mutinynet": {
-        "api": "https://mutinynet.com/api",
+        # Several Esplora endpoints are tried in order: hosts behind
+        # Cloudflare reject datacenter IPs (HTTP 403, "error code: 1010"),
+        # which is exactly what a CI runner is.
+        "apis": ["https://mutinynet.com/api"],
         "faucet": "https://faucet.mutinynet.com/api/onchain",
         "explorer": "https://mutinynet.com",
     },
     "signet": {
-        "api": "https://mempool.space/signet/api",
+        "apis": ["https://mempool.space/signet/api",
+                 "https://blockstream.info/signet/api"],
         "faucet": None,          # public signet faucets need a human
         "explorer": "https://mempool.space/signet",
     },
 }
 SCAN = 5           # receive/change indexes scanned for UTXOs
 FAUCET_SATS = 100_000
+# urllib's default User-Agent is rejected outright by several providers.
+HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/125.0 Safari/537.36"),
+    "Accept": "*/*",
+}
 
 
-def api(base, path, data=None, timeout=45):
-    req = urllib.request.Request(base + path, data=data)
+def http(url, data=None, timeout=45, headers=None):
+    req = urllib.request.Request(
+        url, data=data, headers={**HEADERS, **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read()
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")[:400]
-        raise RuntimeError(f"{base+path} -> HTTP {exc.code}: {body}") from None
+        body = exc.read().decode("utf-8", "replace")[:300].replace("\n", " ")
+        raise RuntimeError(f"HTTP {exc.code} from {url}: {body}") from None
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"cannot reach {url}: {exc.reason}") from None
+
+
+def api(base, path, data=None, timeout=45):
+    """`base` may be a single URL or the working base chosen by
+    select_api()."""
+    return http(base + path, data=data, timeout=timeout)
+
+
+def select_api(cfg):
+    """Pick the first Esplora endpoint that actually answers."""
+    if cfg.get("api"):
+        return cfg["api"]
+    errors = []
+    for base in cfg["apis"]:
+        try:
+            height = int(http(f"{base}/blocks/tip/height", timeout=20))
+            print(f"api: {base} (tip height {height})")
+            cfg["api"] = base
+            return base
+        except (RuntimeError, ValueError) as exc:
+            print(f"api: {base} unavailable — {exc}")
+            errors.append(str(exc))
+    raise RuntimeError("no usable Esplora endpoint. Tried:\n  "
+                       + "\n  ".join(errors))
 
 
 def wallet():
@@ -101,15 +138,8 @@ def request_faucet(cfg, address, sats):
         raise RuntimeError("this network has no automatable faucet; fund the "
                            "deposit address manually and use `run`")
     body = json.dumps({"sats": sats, "address": address}).encode()
-    req = urllib.request.Request(
-        cfg["faucet"], data=body,
-        headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=90) as r:
-            return json.loads(r.read().decode())
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")[:400]
-        raise RuntimeError(f"faucet HTTP {exc.code}: {body}") from None
+    return json.loads(http(cfg["faucet"], data=body, timeout=90,
+                           headers={"Content-Type": "application/json"}).decode())
 
 
 def cmd_faucet(args, cfg):
@@ -208,8 +238,8 @@ def spend(args, cfg, utxos, signer_a, signer_b, policy):
 
 def cmd_run(args, cfg):
     signer_a, signer_b, _c, policy = wallet()
-    print(f"tip height: {int(api(cfg['api'], '/blocks/tip/height'))}")
-    utxos = find_utxos(cfg["api"], policy)
+    base = select_api(cfg)
+    utxos = find_utxos(base, policy)
     if not utxos:
         print(f"no UTXOs — fund {deposit_address(policy)} first")
         sys.exit(1)
@@ -219,12 +249,12 @@ def cmd_run(args, cfg):
 def cmd_auto(args, cfg):
     signer_a, signer_b, _c, policy = wallet()
     print(f"network: {args.network}")
-    print(f"tip height: {int(api(cfg['api'], '/blocks/tip/height'))}")
+    base = select_api(cfg)
     addr = deposit_address(policy)
     print(f"descriptor: {policy.descriptor()}")
     print(f"deposit: {addr}")
 
-    utxos = find_utxos(cfg["api"], policy)
+    utxos = find_utxos(base, policy)
     if not utxos:
         print(f"requesting {args.sats} sats from the faucet")
         try:
@@ -232,7 +262,7 @@ def cmd_auto(args, cfg):
         except RuntimeError as exc:
             print(f"faucet request failed: {exc}")
             print("continuing anyway in case funds arrive another way")
-        utxos = wait_for_utxos(cfg["api"], policy, args.wait_minutes)
+        utxos = wait_for_utxos(base, policy, args.wait_minutes)
     spend(args, cfg, utxos, signer_a, signer_b, policy)
 
 
@@ -261,7 +291,7 @@ def main():
     args = ap.parse_args()
     cfg = dict(NETWORKS[args.network])
     if args.api:
-        cfg["api"] = args.api
+        cfg["apis"] = [args.api]
     {"setup": cmd_setup, "faucet": cmd_faucet,
      "run": cmd_run, "auto": cmd_auto}[args.cmd](args, cfg)
 
