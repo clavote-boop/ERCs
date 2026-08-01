@@ -127,6 +127,21 @@ class TestHardwareRoundTrip(unittest.TestCase):
         cos2 = parse_key_expression(self.expr + "/<0;1>/*")
         self.assertEqual(cos2.xpub.pubkey, cos.xpub.pubkey)
 
+    def test_mainnet_is_refused(self):
+        # two of three keys come from public seeds; on mainnet the
+        # quorum would be satisfiable by anyone who read this repo
+        from interop.hardware_interop import build_quorum, parse_key_expression
+        from swsigner.bip32 import HDKey
+        with self.assertRaises(SystemExit) as ctx:
+            build_quorum(self.expr, "mainnet")
+        self.assertIn("PUBLICLY KNOWN", str(ctx.exception))
+        mainnet_key = HDKey.from_seed(b"\x07" * 32, network="mainnet")
+        with self.assertRaises(ValueError) as ctx2:
+            parse_key_expression(
+                f"[aabbccdd/48h/0h/0h/2h]"
+                f"{mainnet_key.derive('m/48h/0h/0h/2h').to_string('xpub')}")
+        self.assertIn("MAINNET", str(ctx2.exception))
+
     def test_private_key_paste_is_refused(self):
         from interop.hardware_interop import parse_key_expression
         from swsigner.bip32 import HDKey

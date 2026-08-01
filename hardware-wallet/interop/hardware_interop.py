@@ -83,10 +83,28 @@ def parse_key_expression(expr: str):
     xpub = HDKey.from_string(xpub_str)
     if xpub.privkey is not None:
         raise ValueError("that is a PRIVATE key — export the xpub instead")
+    if xpub.network == "mainnet":
+        raise ValueError(
+            "that is a MAINNET key (xpub...). Put the device in "
+            "testnet/signet mode and export again — you should get a "
+            "tpub... on coin type 1'. This wallet must never hold real "
+            "funds: two of its three keys come from public test seeds.")
     return Cosigner(fingerprint, path, xpub)
 
 
 def build_quorum(device_expr: str, network: str):
+    # Two of the three keys in this quorum come from seeds published in
+    # swsigner/tests/test_interop.py. Anyone can derive them. On a test
+    # network that is deliberate and harmless; on mainnet it would mean
+    # a 2-of-3 that the entire internet can already satisfy, so the
+    # combination is refused outright rather than warned about.
+    if network == "mainnet":
+        raise SystemExit(
+            "REFUSED: this quorum uses PUBLICLY KNOWN test seeds for two of\n"
+            "its three keys (see swsigner/tests/test_interop.py). On mainnet\n"
+            "anyone could reconstruct the quorum and spend the funds.\n"
+            "Test networks only. A real wallet needs keys generated on real\n"
+            "devices, none of which may come from this repository.")
     ours = SoftSigner(SEED_A, network=network, name="clavote-a")
     recovery = SoftSigner(SEED_C, network=network, name="recovery-c")
     device = parse_key_expression(device_expr)
@@ -108,9 +126,32 @@ def load_policy(path):
     return build_quorum(saved["device"], saved["network"])
 
 
+def multisig_config(policy, name="clavote"):
+    """The plain-text multisig config that Sparrow, Coldcard, Jade and
+    most others import directly. Less error-prone than hand-copying a
+    descriptor, and it carries the derivation explicitly."""
+    lines = [
+        f"Name: {name}",
+        f"Policy: {policy.m} of {policy.n}",
+        "Format: P2WSH",
+        "",
+    ]
+    for cos in policy.cosigners:
+        deriv = path_to_string(cos.origin_path).replace("h", "'")
+        lines.append(f"Derivation: {deriv}")
+        lines.append(f"{cos.fingerprint.hex().upper()}: "
+                     f"{cos.xpub.to_string('xpub')}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def cmd_quorum(args):
     ours, device, policy = build_quorum(args.device, args.network)
     save_policy(args.policy_file, args.device, args.network)
+    config_path = args.policy_file.replace(".json", "") + "-multisig.txt"
+    with open(config_path, "w") as f:
+        f.write(multisig_config(policy))
+    print(f"multisig config for import: {config_path}")
     print(f"network:    {args.network}")
     print(f"quorum:     2-of-3  (this signer, your device, recovery key)")
     print(f"device fp:  {device.fingerprint.hex()} at "
@@ -232,7 +273,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="Round-trip a spend through real signing hardware.")
     ap.add_argument("--network", default="signet",
-                    choices=("signet", "mutinynet", "testnet", "mainnet"))
+                    choices=("signet", "mutinynet", "testnet"))
     ap.add_argument("--policy-file", default=DEFAULT_POLICY_FILE)
     sub = ap.add_subparsers(dest="cmd", required=True)
 

@@ -31,13 +31,54 @@ A screenless card can hold a *recovery* key if you knowingly accept that
 it cannot check anything it signs. It cannot be the independent
 verifying vendor the 2-of-3 depends on.
 
+## Can I use a device that holds real coins?
+
+**The test itself cannot touch mainnet funds.** It runs on signet, a
+separate network. Signet uses BIP-48 coin type `1'` while mainnet uses
+`0'`, so the keys involved are different keys entirely, and a signet
+signature is meaningless on mainnet. The tooling refuses a mainnet
+`xpub` and refuses `--network mainnet` outright.
+
+**The risk is operational, not cryptographic.** It comes from handling
+the device: switching network modes, a firmware update prompted along
+the way, or a mistaken factory reset. So the decision rule is about
+your backup, not about the test:
+
+- **Seed backed up and verified** (you have the recovery words written
+  down, and you have actually confirmed they restore) → using your
+  existing Jade is fine. A worst-case wipe costs you time, not coins.
+- **Not backed up, or never verified** → do not touch it. Back it up
+  and verify the backup first, or use a second device. This is true
+  regardless of our test.
+
+**Never fund this quorum on mainnet.** Two of its three keys come from
+seeds published in `swsigner/tests/test_interop.py` — anyone can derive
+them. The tooling hard-refuses mainnet for exactly this reason. A real
+wallet needs three keys generated on real devices, none from this
+repository.
+
+## Getting the key out of a Jade
+
+Jade is designed to be driven by a companion app; Sparrow is the
+reliable path and is also what will register the policy and relay the
+PSBT later. Firmware revisions move Jade's own menus around, so drive
+it from Sparrow rather than trusting a menu path written down here.
+
+1. Put the Jade on the right network first. Signet and testnet share
+   BIP-48 coin type 1', and a Jade in mainnet mode will hand you an
+   `xpub` on coin type 0' that will not match this wallet.
+2. In Sparrow: **File → New Wallet**, name it, set **Policy Type:
+   Multi Signature** and **Script Type: Native Segwit (P2WSH)**.
+3. On a cosigner slot choose **Connected Hardware Wallet**, unlock the
+   Jade, and import. Sparrow fills in the key origin — that is the
+   `[fingerprint/48h/1h/0h/2h]tpub…` string this tooling wants. Copy it
+   verbatim, brackets included.
+
 ## Procedure
 
 ```bash
-# 1. Export the device's BIP-48 P2WSH account key.
+# 1. Export the device's BIP-48 P2WSH account key (above).
 #    Test networks: m/48'/1'/0'/2'   Mainnet: m/48'/0'/0'/2'
-#    Sparrow shows this as a key origin line; Jade under
-#    Options -> Wallet -> Export xpub.
 
 # 2. Build the quorum around it.
 python3 -m interop.hardware_interop --network signet quorum \

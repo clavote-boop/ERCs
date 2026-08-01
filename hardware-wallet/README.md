@@ -26,7 +26,7 @@ pure-Python RIPEMD-160, MIT).
 
 ```bash
 cd hardware-wallet
-python3 -m unittest discover -s swsigner/tests -t .   # 58 tests
+python3 -m unittest discover -s swsigner/tests -t .   # 59 tests
 python3 -m swsigner.demo                              # 2-of-3 quorum spend
 ```
 
