@@ -32,11 +32,15 @@ in a day.
 - [x] Independent consensus validation (`interop/consensus_oracle.py`):
       every finalized transaction re-checked by python-bitcoinlib —
       its transaction deserializer, its BIP-143, its libsecp256k1 ECDSA
-- [ ] Live signet spend: wallet + CLI ready (`interop/signet_interop.py`,
-      deterministic public test seeds); needs a network-unrestricted
-      host for faucet + broadcast. Note the consensus oracle above
-      already covers the "is this transaction valid?" half of this
-      gate; what remains is real relay/propagation
+- [x] **Live network spend — DONE.** On mutinynet (public signet
+      variant), 2026-08-01: a real UTXO was verified and displayed, our
+      signer and embit each signed independently, the reference
+      implementation validated the result, a real node accepted the
+      broadcast, and it **confirmed in block 3310102**.
+      txid `cd8ad31296d064123fbbe58c02e7784d574c3b3ff29bfc74e57f4b30a7619240`.
+      Runs unattended in CI (`.github/workflows/signet-live.yml`) —
+      GitHub runners have the unrestricted internet the development
+      container lacks
 - [ ] Interop with two real third-party devices (candidate signer B
       set: Coldcard, BitBox02, Foundation Passport, Blockstream Jade,
       SeedSigner)

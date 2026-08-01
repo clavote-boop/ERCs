@@ -77,6 +77,16 @@ attestation counter that restarted after reboot. Several would have let
 a malicious coordinator move funds to an address the user never saw. [`fuzz/README.md`](fuzz/README.md) documents each
 one.
 
+## Proven on a live network
+
+On 2026-08-01 the whole loop ran against mutinynet, a public signet
+variant, and **confirmed in block 3310102**
+([txid `cd8ad312…`](https://mutinynet.com/tx/cd8ad31296d064123fbbe58c02e7784d574c3b3ff29bfc74e57f4b30a7619240)):
+a real UTXO verified and rendered on the trusted display, signed by our
+signer, co-signed by embit as an independent implementation, validated
+by python-bitcoinlib as a third, accepted by a real node, and mined.
+`.github/workflows/signet-live.yml` repeats it unattended.
+
 ## What this is not
 
 Not a custody product. No constant-time crypto, no side-channel
