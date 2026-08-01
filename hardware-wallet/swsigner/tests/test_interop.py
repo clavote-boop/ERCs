@@ -98,5 +98,82 @@ class TestEmbitCoSigning(unittest.TestCase):
                          "same descriptor")
 
 
+@unittest.skipUnless(HAVE_EMBIT, "embit not installed")
+class TestHardwareRoundTrip(unittest.TestCase):
+    """The path a real third-party device takes.
+
+    embit stands in for the hardware here (independent codebase, its own
+    derivation and signing), exercising exactly the code that will run
+    against a Jade or Coldcard: parse the device's exported key
+    expression, build the quorum, sign on both sides, and verify the
+    device's signature against OUR BIP-143 digest.
+    """
+
+    def setUp(self):
+        from interop.embit_signer import EmbitSigner
+        from interop.hardware_interop import build_quorum
+        self.device = EmbitSigner(sha256(b"stand-in hardware device"),
+                                  network=NETWORK)
+        self.expr = (f"[{self.device.fingerprint.hex()}/48h/1h/0h/2h]"
+                     f"{self.device.account_xpub()}")
+        self.ours, self.device_cos, self.policy = build_quorum(
+            self.expr, NETWORK)
+
+    def test_key_expression_round_trips(self):
+        from interop.hardware_interop import parse_key_expression
+        cos = parse_key_expression(self.expr)
+        self.assertEqual(cos.fingerprint, self.device.fingerprint)
+        # a trailing derivation suffix, as most wallets export it
+        cos2 = parse_key_expression(self.expr + "/<0;1>/*")
+        self.assertEqual(cos2.xpub.pubkey, cos.xpub.pubkey)
+
+    def test_private_key_paste_is_refused(self):
+        from interop.hardware_interop import parse_key_expression
+        from swsigner.bip32 import HDKey
+        xprv = HDKey.from_seed(b"\x02" * 32, network="testnet")
+        with self.assertRaises(ValueError) as ctx:
+            parse_key_expression(f"[aabbccdd/48h/1h/0h/2h]"
+                                 f"{xprv.to_string('xprv')}")
+        self.assertIn("PRIVATE", str(ctx.exception))
+
+    def test_device_signature_validates_against_our_digest(self):
+        funding = Transaction(
+            version=2,
+            vin=[TxIn(OutPoint(b"\x33" * 32, 0), script_sig=b"\x51")],
+            vout=[TxOut(200_000, self.policy.script_pubkey(0, 0))])
+        utxos = [Utxo(funding, 0, 0, 0)]
+        coordinator = Coordinator(self.policy)
+        coordinator.add_utxo(utxos[0])
+        psbt = coordinator.build_psbt([(payee_address(), 90_000)], fee=800)
+
+        ours = PSBT.parse(psbt.serialize())
+        self.ours.sign_psbt(ours, lambda _d, _f: True)
+
+        # the "device" signs the same bytes with its own stack
+        from_device = PSBT.parse(
+            self.device.sign_psbt_bytes(psbt.serialize()))
+
+        # verify the device's signature the way hardware_interop does
+        from swsigner.sighash import SIGHASH_ALL, bip143_sighash
+        from swsigner import secp256k1
+        from swsigner.verify import verify_psbt
+        _facts, verified = verify_psbt(from_device, self.policy)
+        for vin in verified:
+            expected = self.device_cos.xpub.child(vin.branch).child(
+                vin.addr_index).pubkey
+            sig = from_device.inputs[vin.index].partial_sigs.get(expected)
+            self.assertIsNotNone(sig, "device produced no signature")
+            self.assertEqual(sig[-1], SIGHASH_ALL)
+            digest = bip143_sighash(from_device.tx, vin.index,
+                                    vin.script_code, vin.amount, SIGHASH_ALL)
+            r, s = secp256k1.der_to_sig(sig[:-1])
+            self.assertTrue(secp256k1.verify(expected, digest, r, s),
+                            "device signed a different transaction")
+
+        final = coordinator.finalize(
+            Coordinator.combine(psbt, ours, from_device))
+        self.assertTrue(consensus_check(final, utxos))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@ hold.
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The eight ordered v1 decisions (normative) |
 | [`docs/CAAP-INTEGRATION.md`](docs/CAAP-INTEGRATION.md) | How CAAP attestation slots into the wallet |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phases 0–3 and the parked v2 research tracks |
+| [`docs/HARDWARE-INTEROP.md`](docs/HARDWARE-INTEROP.md) | Bringing a real signing device into the quorum |
 | [`swsigner/`](swsigner/) | The software signer, coordinator, and attestation |
 | [`swsigner/tests/`](swsigner/tests/) | Standards vectors + adversarial suite |
 | [`fuzz/`](fuzz/) | Parser fuzzing + semantic fuzzing of the verification engine |
@@ -25,7 +26,7 @@ pure-Python RIPEMD-160, MIT).
 
 ```bash
 cd hardware-wallet
-python3 -m unittest discover -s swsigner/tests -t .   # 55 tests
+python3 -m unittest discover -s swsigner/tests -t .   # 58 tests
 python3 -m swsigner.demo                              # 2-of-3 quorum spend
 ```
 

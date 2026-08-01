@@ -41,9 +41,12 @@ in a day.
       Runs unattended in CI (`.github/workflows/signet-live.yml`) —
       GitHub runners have the unrestricted internet the development
       container lacks
-- [ ] Interop with two real third-party devices (candidate signer B
-      set: Coldcard, BitBox02, Foundation Passport, Blockstream Jade,
-      SeedSigner)
+- [ ] Interop with real third-party devices — tooling ready
+      (`interop/hardware_interop.py`, docs/HARDWARE-INTEROP.md);
+      awaiting a device round-trip. Candidate set: Blockstream Jade,
+      Coldcard, BitBox02, Foundation Passport, SeedSigner. Screenless
+      cards (e.g. Tangem) are excluded on principle: they cannot
+      independently verify what they sign
 - [ ] PSBT v2 (BIP-370) support; taproot single-sig receive/verify
       (v2 fields currently hard-refused in v0 PSBTs by design)
 - [ ] Differential fuzzing against Bitcoin Core's parser
