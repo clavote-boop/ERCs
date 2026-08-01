@@ -67,6 +67,7 @@ NETWORKS = {
 }
 SCAN = 5           # receive/change indexes scanned for UTXOs
 FAUCET_SATS = 100_000
+DUST_P2WSH = 330   # below this a P2WSH output is non-standard
 # urllib's default User-Agent is rejected outright by several providers.
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -245,8 +246,23 @@ def spend(args, cfg, utxos, signer_a, signer_b, policy):
     coordinator = Coordinator(policy)
     for u in utxos:
         coordinator.add_utxo(u)
+
+    # Pick amounts that produce a relayable transaction. Splitting the
+    # balance in half is the nice case, but on a small balance that
+    # leaves change below the dust limit, which nodes reject as
+    # non-standard — so sweep instead and emit no change output at all.
     fee = args.fee
-    send = max(1_000, (total - fee) // 2)
+    available = total - fee
+    if available < DUST_P2WSH + 1_000:
+        raise SystemExit(
+            f"balance {total} sats is too small to spend at a {fee} sat "
+            f"fee; fund the deposit address with more")
+    send = available // 2
+    if available - send < DUST_P2WSH:
+        send = available          # sweep: change_value becomes 0
+        print(f"sweeping {send} sats (a split would leave dust change)")
+    else:
+        print(f"sending {send} sats, {available - send} back as change")
     psbt = coordinator.build_psbt([(payee_address(), send)], fee=fee)
 
     def approve(display, _facts):
