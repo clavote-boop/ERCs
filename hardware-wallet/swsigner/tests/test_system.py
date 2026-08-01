@@ -16,7 +16,7 @@ from swsigner.psbt import PSBT
 from swsigner.script import p2wpkh_script, p2wsh_script
 from swsigner.sighash import bip143_sighash
 from swsigner.tx import Transaction, TxOut
-from swsigner.verify import Refusal
+from swsigner.verify import Refusal, verify_psbt
 from swsigner.hashes import sha256
 
 APPROVE = lambda _display, _facts: True  # noqa: E731
@@ -283,6 +283,24 @@ class TestFuzzRegressions(QuorumFixture):
         final = self.coordinator.finalize(
             Coordinator.combine(self.honest_psbt(), psbt, other))
         self.assertTrue(consensus_check(final, self.utxos))
+
+    def test_displayed_feerate_matches_the_broadcast_transaction(self):
+        # The sat/vB the user approves must describe the transaction
+        # that actually goes out, or the display is lying in a way that
+        # costs money. Estimate must be close and err conservatively.
+        psbt = self.honest_psbt()
+        facts, _v = verify_psbt(psbt, self.policy)
+        a = self.reparse(psbt)
+        b = self.reparse(psbt)
+        self.signer_a.sign_psbt(a, APPROVE)
+        self.signer_b.sign_psbt(b, APPROVE)
+        final = self.coordinator.finalize(Coordinator.combine(psbt, a, b))
+        base = len(final.serialize(include_witness=False))
+        real_vsize = (base * 3 + len(final.serialize()) + 3) // 4
+        self.assertGreaterEqual(facts.est_vsize, real_vsize,
+                                "estimate must not understate size")
+        self.assertLess(facts.est_vsize - real_vsize, real_vsize * 0.05,
+                        "estimate must be within 5% of the real vsize")
 
     def test_duplicate_key_cannot_degrade_the_quorum(self):
         # A repeated key occupies more than one CHECKMULTISIG slot, so
