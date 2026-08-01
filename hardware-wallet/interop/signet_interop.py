@@ -134,12 +134,23 @@ def cmd_setup(args, cfg):
 
 
 def request_faucet(cfg, address, sats):
+    """Ask the network faucet for coins.
+
+    Public faucets increasingly require authentication to deter abuse
+    (mutinynet answers 401 {"error":"Missing token"} without one). Set
+    FAUCET_TOKEN in the environment — in CI, from a repository secret —
+    to supply it.
+    """
     if not cfg["faucet"]:
         raise RuntimeError("this network has no automatable faucet; fund the "
                            "deposit address manually and use `run`")
     body = json.dumps({"sats": sats, "address": address}).encode()
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("FAUCET_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     return json.loads(http(cfg["faucet"], data=body, timeout=90,
-                           headers={"Content-Type": "application/json"}).decode())
+                           headers=headers).decode())
 
 
 def cmd_faucet(args, cfg):
@@ -184,6 +195,23 @@ def wait_for_utxos(base, policy, minutes=10):
             raise RuntimeError(f"no funds arrived after {elapsed}s")
         print(f"  no funds yet at {elapsed}s, waiting 20s...")
         time.sleep(20)
+
+
+def unfunded_message(args, addr):
+    return (
+        "\n" + "=" * 68 + "\n"
+        "  LIVE SPEND SKIPPED — the test wallet holds no coins.\n"
+        "  Everything up to this point (endpoint reachability, wallet\n"
+        "  derivation, the whole offline suite) passed.\n\n"
+        f"  Fund this address once, on {args.network}:\n"
+        f"    {addr}\n\n"
+        "  mutinynet: https://faucet.mutinynet.com (browser), or set the\n"
+        "             FAUCET_TOKEN secret for unattended runs\n"
+        "  signet:    https://signetfaucet.com (browser), then re-run\n"
+        "             with --network signet\n\n"
+        "  Coins are valueless and the seeds are public. Once funded,\n"
+        "  every later run completes the full loop automatically.\n"
+        + "=" * 68)
 
 
 def cmd_probe(args, cfg):
@@ -295,9 +323,12 @@ def cmd_auto(args, cfg):
         try:
             print("faucet response:", request_faucet(cfg, addr, args.sats))
         except RuntimeError as exc:
-            raise SystemExit(
-                f"faucet request failed: {exc}\n"
-                f"fund {addr} by hand and re-run with the `run` command")
+            print(f"faucet unavailable: {exc}")
+            print(unfunded_message(args, addr))
+            # An unfunded wallet is a missing precondition, not a defect
+            # in the signer. Exit cleanly unless the caller insists the
+            # live spend must happen.
+            raise SystemExit(1 if args.require_funds else 0)
         utxos = wait_for_utxos(base, policy, args.wait_minutes)
     spend(args, cfg, utxos, signer_a, signer_b, policy)
 
@@ -322,6 +353,8 @@ def main():
                        default="embit")
         p.add_argument("--fee", type=int, default=800)
         p.add_argument("--confirm-minutes", type=int, default=6)
+        p.add_argument("--require-funds", action="store_true",
+                       help="treat an unfunded wallet as a failure")
         if name == "auto":
             p.add_argument("--sats", type=int, default=FAUCET_SATS)
             p.add_argument("--wait-minutes", type=int, default=10)

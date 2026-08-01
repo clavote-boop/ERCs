@@ -75,8 +75,14 @@ jobs:
         run: |
           python -m interop.signet_interop --network "$NETWORK" \
             probe --sats "$SATS"
+      # Fund the deposit address once (see the skip message for how) and
+      # every later run completes the full loop unattended. FAUCET_TOKEN
+      # is optional; without it an unfunded wallet skips rather than
+      # fails, since that is a missing precondition, not a signer defect.
       - name: Fund, verify, co-sign, broadcast, confirm
         timeout-minutes: 12
+        env:
+          FAUCET_TOKEN: ${{ secrets.FAUCET_TOKEN }}
         run: |
           python -m interop.signet_interop --network "$NETWORK" \
             auto --yes --sats "$SATS" --wait-minutes 5 --confirm-minutes 4
