@@ -20,6 +20,11 @@ def read_varint(f) -> int:
     minimum = {2: 0xFD, 4: 0x10000, 8: 0x100000000}[size]
     if val < minimum:
         raise ValueError("non-canonical varint")
+    # Every varint we parse is a length or a count. Bound it so a hostile
+    # value can never reach an allocator or a read() as an absurd size
+    # (found by fuzz_parsers: 8-byte varints raised OverflowError).
+    if val > 0x0800_0000:
+        raise ValueError("varint exceeds sane bounds")
     return val
 
 
@@ -101,26 +106,29 @@ class Transaction:
     # ------------------------------------------------------------- parsing
 
     @classmethod
-    def parse(cls, raw: bytes):
+    def parse(cls, raw: bytes, allow_witness: bool = True):
+        """allow_witness=False forces pre-segwit parsing — required for
+        the PSBT unsigned tx (BIP-174), and it removes the classic
+        0-input ambiguity (legacy '00 01' vs witness marker+flag)."""
         f = io.BytesIO(raw)
-        tx = cls._parse_stream(f)
+        tx = cls._parse_stream(f, allow_witness)
         if f.read(1):
             raise ValueError("trailing bytes after transaction")
         return tx
 
     @classmethod
-    def _parse_stream(cls, f):
+    def _parse_stream(cls, f, allow_witness=True):
         version = int.from_bytes(_read_exact(f, 4), "little")
-        marker = _read_exact(f, 1)
+        body_start = f.tell()
         segwit = False
-        if marker == b"\x00":
-            flag = _read_exact(f, 1)
-            if flag != b"\x01":
-                raise ValueError("bad segwit flag")
+        if allow_witness and _read_exact(f, 1) == b"\x00" and f.read(1) == b"\x01":
+            # BIP-144 witness serialization (marker 0x00, flag 0x01).
+            # A lone 0x00 is instead a legacy tx with zero inputs, so
+            # only commit to witness format when the flag matches.
             segwit = True
             n_in = read_varint(f)
         else:
-            f.seek(-1, io.SEEK_CUR)
+            f.seek(body_start, io.SEEK_SET)
             n_in = read_varint(f)
         vin = []
         for _ in range(n_in):

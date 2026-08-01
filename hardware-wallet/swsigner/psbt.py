@@ -15,6 +15,18 @@ MAGIC = b"psbt\xff"
 # global types
 G_UNSIGNED_TX = 0x00
 G_XPUB = 0x01
+G_VERSION = 0xFB
+# BIP-370 (PSBTv2) exclusive types — MUST NOT appear in a v0 PSBT, and a
+# mixed PSBT lets two tools disagree about which transaction is being
+# signed, so they are hard errors here (found via differential fuzzing).
+_V2_GLOBAL = frozenset(range(0x02, 0x07))   # tx fields
+_V2_INPUT = frozenset(range(0x0E, 0x13))    # prevout/sequence/locktime
+_V2_OUTPUT = frozenset({0x03, 0x04})        # amount/script
+# BIP-371 taproot types whose key data is an x-only pubkey. The signer
+# does not implement taproot (v1 is segwit v0), but a recognized typed
+# key with malformed key data is still rejected, not passed through.
+IN_TAP_BIP32_DERIVATION = 0x16
+OUT_TAP_BIP32_DERIVATION = 0x07
 # input types
 IN_NON_WITNESS_UTXO = 0x00
 IN_WITNESS_UTXO = 0x01
@@ -69,6 +81,23 @@ def _split_keytype(key: bytes):
 
 def _key(ktype: int, kdata: bytes = b"") -> bytes:
     return write_varint(ktype) + kdata
+
+
+def _require_bare(ktype: int, kdata: bytes):
+    if kdata:
+        raise ValueError(f"typed key {ktype:#x} must carry no key data")
+
+
+def _require_pubkey(ktype: int, kdata: bytes) -> bytes:
+    if len(kdata) not in (33, 65):
+        raise ValueError(f"typed key {ktype:#x} needs a 33/65-byte pubkey")
+    from .secp256k1 import parse_point
+    try:
+        parse_point(kdata)
+    except ValueError:
+        raise ValueError(f"typed key {ktype:#x} pubkey is not a valid "
+                         "curve point") from None
+    return kdata
 
 
 def parse_derivation(value: bytes):
@@ -129,14 +158,30 @@ class PSBT:
         for key, value in gmap.items():
             ktype, kdata = _split_keytype(key)
             if ktype == G_UNSIGNED_TX:
-                if kdata:
-                    raise ValueError("unsigned tx key must be bare")
-                tx = Transaction.parse(value)
+                _require_bare(ktype, kdata)
+                # BIP-174: pre-segwit serialization only, byte-exact.
+                tx = Transaction.parse(value, allow_witness=False)
+                if value != tx.serialize(include_witness=False):
+                    raise ValueError("unsigned tx must use non-witness "
+                                     "serialization")
             elif ktype == G_XPUB:
                 from .base58 import b58check_encode
                 if len(kdata) != 78:
                     raise ValueError("bad global xpub length")
-                xpubs[b58check_encode(kdata)] = parse_derivation(value)
+                xpub_str = b58check_encode(kdata)
+                try:
+                    hd = HDKey.from_string(xpub_str)
+                except ValueError as exc:
+                    raise ValueError(f"invalid global xpub: {exc}") from None
+                if hd.privkey is not None:
+                    raise ValueError("global xpub field holds a private key")
+                xpubs[xpub_str] = parse_derivation(value)
+            elif ktype == G_VERSION:
+                _require_bare(ktype, kdata)
+                if len(value) != 4 or int.from_bytes(value, "little") != 0:
+                    raise ValueError("unsupported PSBT version")
+            elif ktype in _V2_GLOBAL:
+                raise ValueError(f"PSBTv2 global field {ktype:#x} in v0 PSBT")
             else:
                 unknown[key] = value
         if tx is None:
@@ -152,9 +197,11 @@ class PSBT:
             imap = _read_map(f)
             for key, value in imap.items():
                 ktype, kdata = _split_keytype(key)
-                if ktype == IN_NON_WITNESS_UTXO and not kdata:
+                if ktype == IN_NON_WITNESS_UTXO:
+                    _require_bare(ktype, kdata)
                     pin.non_witness_utxo = Transaction.parse(value)
-                elif ktype == IN_WITNESS_UTXO and not kdata:
+                elif ktype == IN_WITNESS_UTXO:
+                    _require_bare(ktype, kdata)
                     from .tx import TxOut, _read_varbytes
                     vf = io.BytesIO(value)
                     amount = int.from_bytes(vf.read(8), "little")
@@ -163,19 +210,33 @@ class PSBT:
                         raise ValueError("trailing bytes in witness utxo")
                     pin.witness_utxo = TxOut(amount, spk)
                 elif ktype == IN_PARTIAL_SIG:
-                    pin.partial_sigs[kdata] = value
-                elif ktype == IN_SIGHASH_TYPE and not kdata:
+                    pin.partial_sigs[_require_pubkey(ktype, kdata)] = value
+                elif ktype == IN_SIGHASH_TYPE:
+                    _require_bare(ktype, kdata)
+                    if len(value) != 4:
+                        raise ValueError("sighash type must be 4 bytes")
                     pin.sighash_type = int.from_bytes(value, "little")
-                elif ktype == IN_REDEEM_SCRIPT and not kdata:
+                elif ktype == IN_REDEEM_SCRIPT:
+                    _require_bare(ktype, kdata)
                     pin.redeem_script = value
-                elif ktype == IN_WITNESS_SCRIPT and not kdata:
+                elif ktype == IN_WITNESS_SCRIPT:
+                    _require_bare(ktype, kdata)
                     pin.witness_script = value
                 elif ktype == IN_BIP32_DERIVATION:
-                    pin.bip32_derivations[kdata] = parse_derivation(value)
-                elif ktype == IN_FINAL_SCRIPTSIG and not kdata:
+                    pin.bip32_derivations[_require_pubkey(ktype, kdata)] = \
+                        parse_derivation(value)
+                elif ktype == IN_FINAL_SCRIPTSIG:
+                    _require_bare(ktype, kdata)
                     pin.final_script_sig = value
-                elif ktype == IN_FINAL_SCRIPTWITNESS and not kdata:
+                elif ktype == IN_FINAL_SCRIPTWITNESS:
+                    _require_bare(ktype, kdata)
                     pin.final_script_witness = value
+                elif ktype in _V2_INPUT:
+                    raise ValueError(
+                        f"PSBTv2 input field {ktype:#x} in v0 PSBT")
+                elif ktype == IN_TAP_BIP32_DERIVATION and len(kdata) != 32:
+                    raise ValueError("taproot derivation key needs a "
+                                     "32-byte x-only pubkey")
                 else:
                     pin.unknown[key] = value
 
@@ -183,12 +244,21 @@ class PSBT:
             omap = _read_map(f)
             for key, value in omap.items():
                 ktype, kdata = _split_keytype(key)
-                if ktype == OUT_REDEEM_SCRIPT and not kdata:
+                if ktype == OUT_REDEEM_SCRIPT:
+                    _require_bare(ktype, kdata)
                     pout.redeem_script = value
-                elif ktype == OUT_WITNESS_SCRIPT and not kdata:
+                elif ktype == OUT_WITNESS_SCRIPT:
+                    _require_bare(ktype, kdata)
                     pout.witness_script = value
                 elif ktype == OUT_BIP32_DERIVATION:
-                    pout.bip32_derivations[kdata] = parse_derivation(value)
+                    pout.bip32_derivations[_require_pubkey(ktype, kdata)] = \
+                        parse_derivation(value)
+                elif ktype in _V2_OUTPUT:
+                    raise ValueError(
+                        f"PSBTv2 output field {ktype:#x} in v0 PSBT")
+                elif ktype == OUT_TAP_BIP32_DERIVATION and len(kdata) != 32:
+                    raise ValueError("taproot derivation key needs a "
+                                     "32-byte x-only pubkey")
                 else:
                     pout.unknown[key] = value
 
