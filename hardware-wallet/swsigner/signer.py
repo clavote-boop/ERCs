@@ -15,7 +15,7 @@ from .sighash import SIGHASH_ALL, bip143_sighash
 from .verify import Refusal, verify_psbt
 
 # BIP-48 multisig account: m/48h/{coin}h/{account}h/2h (2h = P2WSH)
-_COIN = {"mainnet": 0, "testnet": 1, "regtest": 1}
+_COIN = {"mainnet": 0, "testnet": 1, "signet": 1, "regtest": 1}
 
 
 class SoftSigner:

@@ -18,7 +18,7 @@ OP_HASH160 = 0xA9
 OP_CHECKSIG = 0xAC
 OP_CHECKMULTISIG = 0xAE
 
-HRP = {"mainnet": "bc", "testnet": "tb", "regtest": "bcrt"}
+HRP = {"mainnet": "bc", "testnet": "tb", "signet": "tb", "regtest": "bcrt"}
 
 
 def push(data: bytes) -> bytes:

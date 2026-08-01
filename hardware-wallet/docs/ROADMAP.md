@@ -17,15 +17,25 @@ Phases are sequential; each gate must hold before the next phase starts.
 Gate: full test suite green; a reviewer can read `swsigner/` end-to-end
 in a day.
 
-## Phase 1 — Software signer hardened + interop
+## Phase 1 — Software signer hardened + interop (IN PROGRESS)
 
-- Testnet/signet interop: our signer co-signing with two real
-  third-party devices (candidate signer B set: Coldcard, BitBox02,
-  Foundation Passport, Blockstream Jade, SeedSigner)
-- PSBT v2 (BIP-370) support; taproot single-sig receive/verify
-- Differential fuzzing of the PSBT parser against Bitcoin Core's
-- Hybrid PQ envelopes (X25519+ML-KEM-768, Ed25519/secp256k1+ML-DSA)
-  for backup and transport formats, with algorithm-agility IDs
+- [x] Fuzzing started: mutational + differential (embit) harnesses in
+      `fuzz/`; ~500k+100k inputs, six parser bug classes fixed, zero
+      open findings (see fuzz/README.md)
+- [x] Cross-implementation co-signing: embit signs our coordinator's
+      PSBTs as an independent vendor-B stack, and derives identical
+      addresses from our descriptor (`interop/`, test_interop.py)
+- [ ] Live signet spend: wallet + CLI ready (`interop/signet_interop.py`,
+      deterministic public test seeds); needs a network-unrestricted
+      host for faucet + broadcast
+- [ ] Interop with two real third-party devices (candidate signer B
+      set: Coldcard, BitBox02, Foundation Passport, Blockstream Jade,
+      SeedSigner)
+- [ ] PSBT v2 (BIP-370) support; taproot single-sig receive/verify
+      (v2 fields currently hard-refused in v0 PSBTs by design)
+- [ ] Differential fuzzing against Bitcoin Core's parser
+- [ ] Hybrid PQ envelopes (X25519+ML-KEM-768, Ed25519/secp256k1+ML-DSA)
+      for backup and transport formats, with algorithm-agility IDs
 
 Gate: 1000+ fuzz-hours without a parser safety failure; successful
 signet spends in a 2-of-3 with two independent vendors.
