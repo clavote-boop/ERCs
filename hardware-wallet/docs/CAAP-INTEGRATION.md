@@ -32,7 +32,7 @@ audit trail. They are never a spend gate (ARCHITECTURE.md, Decision 5).
 | `H_A` | action hash | SHA-256 over (`"sign-event"` ∥ PSBT hash ∥ display-facts hash ∥ wallet-policy id) — the display-facts hash commits to exactly what the trusted display showed: destinations, amounts, verified change, fee |
 | `H_C` | combined commitment hash | unchanged: `H(H_T ∥ H_P ∥ H_A ∥ seq ∥ context)` |
 | `pk_session`, `σ` | one-time ML-DSA-65 keypair/signature | unchanged in the hardware product. SW profile signs with a one-time secp256k1 key (`alg: "es256k1-ephemeral"`) because this repo is dependency-free; the record format carries an algorithm ID so ML-DSA drops in without format change |
-| `seq`, `t₀` | monotone counter, HW timestamp | unchanged (SW: monotone file-backed counter, OS clock, so declared) |
+| `seq`, `t₀` | monotone counter, HW timestamp | HW: counter lives in the secure element. SW: monotone counter persisted to `state_path` (atomic write, fails closed if unreadable); **without a `state_path` it is in-memory only and restarts replay sequence numbers** — acceptable for tests, never for a deployment whose records are meant as evidence. Timestamp is the OS clock, so declared |
 
 ## Claims the wallet relies on — and claims it does not
 

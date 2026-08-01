@@ -58,6 +58,10 @@ def multisig_witness_script(m: int, pubkeys: list) -> bytes:
     n = len(pubkeys)
     if not 1 <= m <= n <= 15:
         raise ValueError("bad multisig parameters")
+    if len(set(pubkeys)) != n:
+        raise ValueError("duplicate key in multisig script: the quorum "
+                         "would be satisfiable by fewer signers than it "
+                         "claims")
     out = small_int_op(m)
     for pk in pubkeys:
         if len(pk) != 33:
@@ -91,6 +95,12 @@ def parse_multisig(witness_script: bytes):
         i += 34
     if len(pubkeys) != n or not 1 <= m <= n:
         raise ValueError("malformed multisig script")
+    # Reject on the parse side too: witness scripts also arrive from the
+    # untrusted coordinator, and a repeated key silently lowers the
+    # real threshold below the one displayed to the user.
+    if len(set(pubkeys)) != n:
+        raise ValueError("duplicate key in multisig script: the quorum "
+                         "is satisfiable by fewer signers than it claims")
     return m, pubkeys
 
 

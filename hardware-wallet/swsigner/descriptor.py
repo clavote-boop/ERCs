@@ -33,6 +33,14 @@ class WshSortedMulti:
         fps = [c.fingerprint for c in cosigners]
         if len(set(fps)) != len(fps):
             raise ValueError("duplicate cosigner fingerprint")
+        # A repeated key would occupy more than one quorum slot, and
+        # CHECKMULTISIG would let its holder satisfy the threshold alone
+        # — an m-of-n that is really 1-of-(n-m+1). Fingerprints are
+        # attacker-supplied metadata, so compare the key material.
+        keys = [(c.xpub.pubkey, c.xpub.chaincode) for c in cosigners]
+        if len(set(keys)) != len(keys):
+            raise ValueError("duplicate cosigner key: one signer would "
+                             "hold multiple quorum slots")
         self.m = m
         # canonical order so every device computes the same policy id
         self.cosigners = sorted(cosigners, key=lambda c: c.xpub.to_string("xpub"))

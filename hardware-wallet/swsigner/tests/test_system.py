@@ -284,6 +284,36 @@ class TestFuzzRegressions(QuorumFixture):
             Coordinator.combine(self.honest_psbt(), psbt, other))
         self.assertTrue(consensus_check(final, self.utxos))
 
+    def test_duplicate_key_cannot_degrade_the_quorum(self):
+        # A repeated key occupies more than one CHECKMULTISIG slot, so
+        # its holder alone satisfies the threshold: a "2-of-3" that is
+        # really 1-of-2. This defeats the whole multi-vendor premise
+        # (ARCHITECTURE.md, Decision 3), and fingerprints are
+        # attacker-supplied metadata, so key material must be compared.
+        from swsigner.bip32 import parse_path
+        from swsigner.descriptor import Cosigner, WshSortedMulti
+        from swsigner.script import multisig_witness_script, parse_multisig
+        from swsigner.script import OP_CHECKMULTISIG, push, small_int_op
+
+        ours = self.signer_a.cosigner_record()
+        twin = Cosigner(b"\xde\xad\xbe\xef", parse_path("m/48h/1h/0h/2h"),
+                        ours.xpub)
+        with self.assertRaises(ValueError) as ctx:
+            WshSortedMulti(2, [ours, twin, self.signer_b.cosigner_record()],
+                           network=self.policy.network)
+        self.assertIn("duplicate cosigner key", str(ctx.exception))
+
+        pk1 = ours.xpub.pubkey
+        pk2 = self.signer_b.cosigner_record().xpub.pubkey
+        with self.assertRaises(ValueError):
+            multisig_witness_script(2, [pk1, pk1, pk2])
+
+        # and a duplicate-key script arriving from the coordinator
+        evil = (small_int_op(2) + push(pk1) + push(pk1) + push(pk2)
+                + small_int_op(3) + bytes([OP_CHECKMULTISIG]))
+        with self.assertRaises(ValueError):
+            parse_multisig(evil)
+
     def test_combine_refuses_conflicting_signatures(self):
         # signing is deterministic, so two different signatures for one
         # key on one input means one is forged — a later PSBT copy must
@@ -351,6 +381,31 @@ class TestAttestation(QuorumFixture):
         # tampering with the record must fail
         tampered = dict(record, H_A=sha256(b"x").hex())
         self.assertFalse(verify_record(tampered))
+
+    def test_counter_survives_restart_when_persisted(self):
+        # Without persistence a reboot replays sequence numbers and two
+        # distinct signing events collide on (device, seq), which is
+        # exactly what makes the audit trail unusable as evidence.
+        import tempfile
+        from swsigner.attestation import SoftAttestor
+        secret = sha256(b"restart-test device")
+        with tempfile.TemporaryDirectory() as d:
+            path = f"{d}/caap.seq"
+            first = SoftAttestor(secret, state_path=path)
+            args = dict(psbt_hash=b"\x01" * 32, display_digest=b"\x02" * 32,
+                        policy_id=b"\x03" * 32)
+            a = first.attest(**args)
+            b = first.attest(**args)
+            rebooted = SoftAttestor(secret, state_path=path)
+            c = rebooted.attest(**args)
+            self.assertEqual([a["seq"], b["seq"], c["seq"]], [1, 2, 3])
+            self.assertEqual(a["H_P"], c["H_P"], "same device identity")
+
+            # a corrupt counter must fail closed, never restart at zero
+            with open(path, "w") as f:
+                f.write("not a number")
+            with self.assertRaises(ValueError):
+                SoftAttestor(secret, state_path=path)
 
     def test_sequence_is_monotone(self):
         psbt1 = self.reparse(self.honest_psbt())

@@ -94,6 +94,33 @@ transaction it had not honestly shown the user.
    `finalize` now verifies every signature against the BIP-143 digest
    before it goes into a witness.
 
+### Findings from targeted analysis
+
+Found by reasoning about paths the fuzzers do not reach (policy
+construction and attestation state), then confirmed with a probe.
+
+7. **Duplicate key degrades the quorum — the most serious finding so
+   far.** `WshSortedMulti` rejected duplicate cosigner *fingerprints*,
+   but fingerprints are attacker-supplied metadata. Registering the
+   same xpub twice under different fingerprints produced a witness
+   script with the same pubkey in two of three slots — and
+   CHECKMULTISIG is then satisfiable by that one key alone. The
+   "2-of-3" is really 1-of-2. This was demonstrated end to end: a
+   single signer produced a spend that **python-bitcoinlib validates as
+   a fully valid 2-of-3**. It directly falsifies the guarantee the
+   whole architecture rests on (Decision 3: "v1 hardware never has to
+   be trusted alone"). Now refused at three layers — policy
+   construction compares key material, script construction rejects
+   duplicates, and `parse_multisig` rejects them in scripts arriving
+   from the coordinator.
+8. **Attestation counter restarted at zero.** `SoftAttestor` kept `seq`
+   in memory while the integration doc claimed a persisted monotone
+   counter. After a restart, distinct signing events collided on
+   `(device, seq)`, so the audit trail could not be ordered or
+   gap-checked — the property the records exist to provide. Now
+   persisted atomically via `state_path`, failing closed on a corrupt
+   counter rather than silently restarting the sequence.
+
 ### Parser findings
 
 1. **Unbounded varint → `OverflowError`** (mutational, P1). An 8-byte

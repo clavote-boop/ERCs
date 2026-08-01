@@ -49,11 +49,50 @@ def _hkdf_sha256(ikm: bytes, salt: bytes, info: bytes, length: int) -> bytes:
 
 
 class SoftAttestor:
-    def __init__(self, device_secret: bytes, seq: int = 0):
+    """Emits CAAP records for signing events.
+
+    `state_path` persists the event counter. Without it the counter
+    lives only in memory, so a restart replays sequence numbers and two
+    distinct signing events collide on (device, seq) — which destroys
+    the ordering and gap-detection that make the audit trail evidence
+    at all. Hardware keeps this counter in the secure element; pass a
+    path in any deployment that outlives one process.
+    """
+
+    def __init__(self, device_secret: bytes, seq: int = 0, state_path=None):
         if len(device_secret) < 16:
             raise ValueError("device secret too short")
         self._h_p = sha256(b"caap-sw1-hp" + device_secret)
-        self.seq = seq
+        self.state_path = state_path
+        self.seq = max(seq, self._load_seq())
+
+    def _load_seq(self) -> int:
+        if not self.state_path or not os.path.exists(self.state_path):
+            return 0
+        try:
+            with open(self.state_path) as f:
+                stored = int(f.read().strip())
+        except (OSError, ValueError) as exc:
+            # Fail closed. Continuing from 0 is precisely the bug this
+            # file exists to prevent.
+            raise ValueError(
+                f"attestation counter at {self.state_path} is unreadable "
+                f"({exc}); refusing to restart the sequence") from None
+        if stored < 0:
+            raise ValueError("attestation counter is negative")
+        return stored
+
+    def _store_seq(self, seq: int):
+        if not self.state_path:
+            return
+        # Persist before the record is handed out, atomically, so a
+        # crash mid-write can never lower the counter.
+        tmp = f"{self.state_path}.tmp"
+        with open(tmp, "w") as f:
+            f.write(str(seq))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.state_path)
 
     @property
     def device_id(self) -> bytes:
@@ -64,6 +103,7 @@ class SoftAttestor:
                policy_id: bytes) -> dict:
         self.seq += 1
         seq = self.seq
+        self._store_seq(seq)
         t0 = int(time.time() * 1000)
 
         entropy = os.urandom(32)

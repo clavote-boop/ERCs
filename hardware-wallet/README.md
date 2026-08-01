@@ -25,7 +25,7 @@ pure-Python RIPEMD-160, MIT).
 
 ```bash
 cd hardware-wallet
-python3 -m unittest discover -s swsigner/tests -t .   # 45 tests
+python3 -m unittest discover -s swsigner/tests -t .   # 49 tests
 python3 -m swsigner.demo                              # 2-of-3 quorum spend
 ```
 
@@ -70,10 +70,11 @@ exists.
   is re-validated by python-bitcoinlib's deserializer, BIP-143, and
   libsecp256k1 ECDSA.
 
-Twelve real defect classes have been found and fixed by this tooling so
-far — six in the parsers, six in the verification/signing path, several
-of which would have let a malicious coordinator move funds to an address
-the user never saw. [`fuzz/README.md`](fuzz/README.md) documents each
+Fourteen real defect classes have been found and fixed by this tooling
+so far — six in the parsers, six in the verification/signing path, plus
+a quorum-degradation bug that let a single key spend a 2-of-3 and an
+attestation counter that restarted after reboot. Several would have let
+a malicious coordinator move funds to an address the user never saw. [`fuzz/README.md`](fuzz/README.md) documents each
 one.
 
 ## What this is not
