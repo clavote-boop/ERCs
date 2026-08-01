@@ -44,10 +44,19 @@ header; both harnesses exit nonzero when anything is found.
 
 ## Findings to date (all fixed)
 
-Campaign volume so far: ~600k mutational parser inputs, ~115k
-differential inputs vs embit, ~6k semantic scenarios against the
-verification engine, plus the full BIP-174 published vector set.
-Current state: **zero open findings**.
+Campaign volume so far: ~660k mutational parser inputs, ~130k
+differential inputs vs embit, and ~4.5k semantic scenarios against the
+verification engine (each of which builds, verifies, signs, finalizes
+and independently re-validates a transaction), plus the full BIP-174
+and BIP-350 published vector sets. Current state: **zero open
+findings**.
+
+The semantic campaign is deliberately slower per iteration than the
+parser one — every accepted scenario runs the complete custody loop
+through two signers and the reference implementation. Roughly a quarter
+of generated scenarios survive to the invariant checks; the rest are
+refused, and the refusal-code histogram printed at the end of each run
+is the quickest way to see which defences are actually firing.
 
 ### Verification-engine findings (semantic fuzzer)
 
