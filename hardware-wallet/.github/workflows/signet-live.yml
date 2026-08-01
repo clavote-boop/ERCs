@@ -52,8 +52,12 @@ jobs:
 
   live-network:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 18
     needs: offline-suite
+    env:
+      PYTHONUNBUFFERED: "1"
+      NETWORK: ${{ inputs.network || 'mutinynet' }}
+      SATS: ${{ inputs.sats || '100000' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -62,11 +66,17 @@ jobs:
       - name: Install interop dependencies
         run: pip install --quiet embit python-bitcoinlib
       - name: Wallet identity
+        run: python -m interop.signet_interop --network "$NETWORK" setup
+      # Diagnostics first: reports endpoint reachability and the exact
+      # faucet response without ever blocking. Always succeeds, so the
+      # log tells us what happened even when the live step then fails.
+      - name: Probe endpoints and faucet
+        timeout-minutes: 4
         run: |
-          python -m interop.signet_interop \
-            --network "${{ inputs.network || 'mutinynet' }}" setup
+          python -m interop.signet_interop --network "$NETWORK" \
+            probe --sats "$SATS"
       - name: Fund, verify, co-sign, broadcast, confirm
+        timeout-minutes: 12
         run: |
-          python -m interop.signet_interop \
-            --network "${{ inputs.network || 'mutinynet' }}" \
-            auto --yes --sats "${{ inputs.sats || '100000' }}"
+          python -m interop.signet_interop --network "$NETWORK" \
+            auto --yes --sats "$SATS" --wait-minutes 5 --confirm-minutes 4

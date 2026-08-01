@@ -149,29 +149,64 @@ def cmd_faucet(args, cfg):
     print("faucet response:", request_faucet(cfg, addr, args.sats))
 
 
-def find_utxos(base, policy):
-    """Scan the first SCAN indexes of both branches via Esplora."""
+def find_utxos(base, policy, scan=SCAN, timeout=45):
+    """Scan the first `scan` indexes of both branches via Esplora."""
     found = []
     for branch in (0, 1):
-        for index in range(SCAN):
+        for index in range(scan):
             addr = to_address(policy.script_pubkey(branch, index), NETWORK)
-            for u in json.loads(api(base, f"/address/{addr}/utxo")):
-                rawtx = api(base, f"/tx/{u['txid']}/hex").decode()
+            utxos = json.loads(
+                api(base, f"/address/{addr}/utxo", timeout=timeout))
+            for u in utxos:
+                rawtx = api(base, f"/tx/{u['txid']}/hex",
+                            timeout=timeout).decode()
                 prevtx = Transaction.parse(bytes.fromhex(rawtx))
                 found.append(Utxo(prevtx, u["vout"], branch, index))
     return found
 
 
 def wait_for_utxos(base, policy, minutes=10):
+    """Poll for funds. Polls use short timeouts and scan only the first
+    couple of indexes, so a slow provider cannot stretch the wait far
+    past its stated bound."""
     deadline = time.time() + minutes * 60
+    started = time.time()
     while True:
-        utxos = find_utxos(base, policy)
+        try:
+            utxos = find_utxos(base, policy, scan=2, timeout=12)
+        except RuntimeError as exc:
+            print(f"  poll failed ({exc}); retrying")
+            utxos = []
         if utxos:
-            return utxos
+            return find_utxos(base, policy)
+        elapsed = int(time.time() - started)
         if time.time() > deadline:
-            raise RuntimeError(f"no UTXOs after {minutes} minutes")
-        print("  no funds yet, waiting 20s...")
+            raise RuntimeError(f"no funds arrived after {elapsed}s")
+        print(f"  no funds yet at {elapsed}s, waiting 20s...")
         time.sleep(20)
+
+
+def cmd_probe(args, cfg):
+    """Diagnostics only: report reachability of every endpoint, and what
+    the faucet says, without ever blocking the run. Always exits 0."""
+    _a, _b, _c, policy = wallet()
+    addr = deposit_address(policy)
+    print(f"network: {args.network}")
+    print(f"deposit: {addr}")
+    for base in cfg["apis"]:
+        for path in ("/blocks/tip/height", f"/address/{addr}/utxo"):
+            try:
+                body = http(base + path, timeout=15).decode()[:200]
+                print(f"  OK   {base}{path} -> {body}")
+            except RuntimeError as exc:
+                print(f"  FAIL {base}{path} -> {exc}")
+    if cfg["faucet"]:
+        try:
+            print("  faucet ->", request_faucet(cfg, addr, args.sats))
+        except RuntimeError as exc:
+            print(f"  faucet FAIL -> {exc}")
+    else:
+        print("  faucet: none configured for this network")
 
 
 def spend(args, cfg, utxos, signer_a, signer_b, policy):
@@ -260,8 +295,9 @@ def cmd_auto(args, cfg):
         try:
             print("faucet response:", request_faucet(cfg, addr, args.sats))
         except RuntimeError as exc:
-            print(f"faucet request failed: {exc}")
-            print("continuing anyway in case funds arrive another way")
+            raise SystemExit(
+                f"faucet request failed: {exc}\n"
+                f"fund {addr} by hand and re-run with the `run` command")
         utxos = wait_for_utxos(base, policy, args.wait_minutes)
     spend(args, cfg, utxos, signer_a, signer_b, policy)
 
@@ -275,6 +311,8 @@ def main():
     sub.add_parser("setup")
     fa = sub.add_parser("faucet")
     fa.add_argument("--sats", type=int, default=FAUCET_SATS)
+    pr = sub.add_parser("probe")
+    pr.add_argument("--sats", type=int, default=FAUCET_SATS)
 
     for name in ("run", "auto"):
         p = sub.add_parser(name)
@@ -292,7 +330,7 @@ def main():
     cfg = dict(NETWORKS[args.network])
     if args.api:
         cfg["apis"] = [args.api]
-    {"setup": cmd_setup, "faucet": cmd_faucet,
+    {"setup": cmd_setup, "faucet": cmd_faucet, "probe": cmd_probe,
      "run": cmd_run, "auto": cmd_auto}[args.cmd](args, cfg)
 
 
