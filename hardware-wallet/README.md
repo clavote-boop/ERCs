@@ -15,6 +15,7 @@ hold.
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phases 0–3 and the parked v2 research tracks |
 | [`swsigner/`](swsigner/) | The software signer, coordinator, and attestation |
 | [`swsigner/tests/`](swsigner/tests/) | Standards vectors + adversarial suite |
+| [`fuzz/`](fuzz/) | Mutational + differential (vs embit) parser fuzzing |
 
 ## Run it
 
@@ -23,7 +24,7 @@ pure-Python RIPEMD-160, MIT).
 
 ```bash
 cd hardware-wallet
-python3 -m unittest discover -s swsigner/tests -t .   # 31 tests
+python3 -m unittest discover -s swsigner/tests -t .   # 35 tests
 python3 -m swsigner.demo                              # 2-of-3 quorum spend
 ```
 
@@ -51,6 +52,12 @@ exists.
 - **CAAP attestation**: records verify offline, bind the exact display
   transcript to the signed PSBT, use strictly monotone sequence
   numbers, and never reuse a session key.
+- **BIP-174 conformance + fuzzing** (`test_bip174_vectors.py`,
+  [`fuzz/`](fuzz/)): the full published vector set passes, and the
+  parsers have survived ~500k mutational inputs plus ~100k differential
+  inputs against embit with zero open findings — see
+  [`fuzz/README.md`](fuzz/README.md) for the six parser bugs the
+  campaign found and fixed.
 
 ## What this is not
 

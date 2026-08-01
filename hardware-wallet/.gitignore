@@ -1,0 +1,4 @@
+fuzz/crashes/
+__pycache__/
+*.pyc
+.venv/
