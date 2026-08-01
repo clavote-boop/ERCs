@@ -91,11 +91,29 @@ class Coordinator:
         for other in others:
             if other.psbt_hash() != base_hash:
                 raise ValueError("cannot combine PSBTs for different txs")
-            for pin, opin in zip(base.inputs, other.inputs):
-                pin.partial_sigs.update(opin.partial_sigs)
+            for i, (pin, opin) in enumerate(zip(base.inputs, other.inputs)):
+                for pubkey, sig in opin.partial_sigs.items():
+                    existing = pin.partial_sigs.get(pubkey)
+                    if existing is not None and existing != sig:
+                        # Signing is deterministic (RFC 6979), so two
+                        # different signatures for one key on one input
+                        # means one of them is forged. Never let the
+                        # later copy silently overwrite the earlier.
+                        raise ValueError(
+                            f"conflicting signatures for the same key on "
+                            f"input {i}")
+                    pin.partial_sigs[pubkey] = sig
         return base
 
     # ---------------------------------------------------------- finalizing
+
+    @staticmethod
+    def _input_amount(psbt: PSBT, i: int, pin) -> int:
+        if pin.witness_utxo is not None:
+            return pin.witness_utxo.value
+        if pin.non_witness_utxo is not None:
+            return pin.non_witness_utxo.vout[psbt.tx.vin[i].prevout.vout].value
+        raise ValueError(f"input {i} has no UTXO information")
 
     def finalize(self, psbt: PSBT) -> Transaction:
         """Assemble witnesses and extract the final transaction."""
@@ -105,11 +123,29 @@ class Coordinator:
             if pin.witness_script is None:
                 raise ValueError(f"input {i} missing witness script")
             m, quorum_keys = parse_multisig(pin.witness_script)
+            amount = self._input_amount(psbt, i, pin)
+            digest = bip143_sighash(tx, i, pin.witness_script, amount)
+            # Verify before assembling. A signature that does not check
+            # out here would produce a transaction the network rejects,
+            # with nothing to say which signer was at fault — and the
+            # signatures arrive via an untrusted coordinator.
+            valid = {}
+            for pubkey, sig in pin.partial_sigs.items():
+                if not sig or sig[-1] != SIGHASH_ALL:
+                    continue
+                try:
+                    r, s = der_to_sig(sig[:-1])
+                except ValueError:
+                    continue
+                if ecdsa_verify(pubkey, digest, r, s):
+                    valid[pubkey] = sig
             # CHECKMULTISIG pops sigs in key order; order ours to match.
-            ordered = [pin.partial_sigs[pk] for pk in quorum_keys
-                       if pk in pin.partial_sigs]
+            ordered = [valid[pk] for pk in quorum_keys if pk in valid]
             if len(ordered) < m:
-                raise ValueError(f"input {i} has {len(ordered)} of {m} sigs")
+                raise ValueError(
+                    f"input {i} has {len(ordered)} valid of {m} required "
+                    f"signatures ({len(pin.partial_sigs) - len(valid)} "
+                    "supplied signatures did not verify)")
             stack = [b""] + ordered[:m] + [pin.witness_script]
             witnesses.append(stack)
             pin.final_script_witness = _ser_witness(stack)

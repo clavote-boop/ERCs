@@ -19,15 +19,24 @@ in a day.
 
 ## Phase 1 — Software signer hardened + interop (IN PROGRESS)
 
-- [x] Fuzzing started: mutational + differential (embit) harnesses in
-      `fuzz/`; ~500k+100k inputs, six parser bug classes fixed, zero
-      open findings (see fuzz/README.md)
+- [x] Parser fuzzing: mutational + differential (embit) harnesses in
+      `fuzz/`; ~600k+115k inputs, six parser bug classes fixed
+- [x] **Verification-engine fuzzing** (`fuzz/fuzz_verify.py`): semantic
+      property testing against ground truth — six further findings,
+      including hidden inputs/outputs, duplicate outpoints, and
+      signature-slot squatting. These were security bugs, not
+      robustness nits (see fuzz/README.md)
 - [x] Cross-implementation co-signing: embit signs our coordinator's
       PSBTs as an independent vendor-B stack, and derives identical
       addresses from our descriptor (`interop/`, test_interop.py)
+- [x] Independent consensus validation (`interop/consensus_oracle.py`):
+      every finalized transaction re-checked by python-bitcoinlib —
+      its transaction deserializer, its BIP-143, its libsecp256k1 ECDSA
 - [ ] Live signet spend: wallet + CLI ready (`interop/signet_interop.py`,
       deterministic public test seeds); needs a network-unrestricted
-      host for faucet + broadcast
+      host for faucet + broadcast. Note the consensus oracle above
+      already covers the "is this transaction valid?" half of this
+      gate; what remains is real relay/propagation
 - [ ] Interop with two real third-party devices (candidate signer B
       set: Coldcard, BitBox02, Foundation Passport, Blockstream Jade,
       SeedSigner)

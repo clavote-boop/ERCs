@@ -10,20 +10,91 @@ Phase-1 fuzzing treatment ahead of everything else.
 |---|---|
 | `fuzz_parsers.py` | Structure-aware mutational fuzzer (deterministic by `--seed`). Properties: **P1** parse raises only `ValueError`; **P2** accepted inputs reserialize, reparse, and hit a canonical fixpoint. |
 | `differential_embit.py` | Differential vs [embit](https://github.com/diybitcoinhardware/embit) (the pure-Python library SeedSigner uses). Classifies every disagreement: our documented strictness, embit's known divergences, embit internal errors, or a genuine finding. Needs `pip install embit` (dev-only dependency). |
+| `fuzz_verify.py` | **Semantic fuzzer for the verification engine.** Holds ground truth about the real UTXO set and policy, applies adversarial mutations, and asserts that whenever the signer *agrees to sign*, what it showed the user was true. See invariants below. Optionally validates every finalized transaction against a third implementation (`pip install python-bitcoinlib`). |
 
 ```bash
 python3 -m fuzz.fuzz_parsers --iterations 50000 --seed 2
 python3 -m fuzz.differential_embit --iterations 20000 --seed 7
+python3 -m fuzz.fuzz_verify --iterations 2000 --seed 3
 ```
+
+### Why the semantic fuzzer matters most
+
+The parser fuzzer asks "does bad input crash us?" — a robustness question.
+`fuzz_verify.py` asks the question this device exists to answer: **when
+the signer says yes, is the display honest?** Its invariants are
+security properties, not nits — a violation means the user approved one
+transaction and the device signed another:
+
+| | Invariant |
+|---|---|
+| V1 | displayed total input == real sum of the inputs' prevout values |
+| V2 | displayed fee == real (inputs − outputs) |
+| V3 | display is self-consistent: destinations + change + fee == inputs |
+| V4 | **no hidden outputs** — every output of the signed tx is on the display, with its true address and value |
+| V5 | every output shown as "change" really is ours, on the change branch, at the path it claims |
+| V6 | no outpoint is spent (and counted) twice |
+| V7 | change lands at an index a wallet will actually rescan |
+| S1 | every signature verifies against the BIP-143 digest of exactly the displayed transaction |
+| S2 | declining on the trusted display never changes the signature set |
+| C1 | anything the device helps finalize is accepted by an independent implementation of the consensus rules |
 
 Findings are written to `fuzz/crashes/` as hex files with a repro
 header; both harnesses exit nonzero when anything is found.
 
 ## Findings to date (all fixed)
 
-Campaign volume so far: ~500k mutational inputs across seeds and both
-parsers, ~100k differential inputs vs embit, plus the full BIP-174
-published vector set. Current state: **zero findings**.
+Campaign volume so far: ~600k mutational parser inputs, ~115k
+differential inputs vs embit, ~6k semantic scenarios against the
+verification engine, plus the full BIP-174 published vector set.
+Current state: **zero open findings**.
+
+### Verification-engine findings (semantic fuzzer)
+
+These are the serious ones — each let the signer approve and sign a
+transaction it had not honestly shown the user.
+
+1. **Hidden outputs / hidden inputs** (V1, V2, V4). `verify_psbt`
+   walked inputs and outputs with `zip(tx.vin, psbt.inputs)`. `zip`
+   stops at the shorter sequence, so any transaction input or output
+   beyond the end of the PSBT's records was **never verified, never
+   displayed, and never counted in the totals** — while the BIP-143
+   sighash still committed to it. That is the H-2 attack in its purest
+   form: value leaving to an address the user never saw, with a
+   plausible fee on screen. Fixed by asserting one-to-one coverage at
+   the top of the verification engine. The BIP-174 parser already
+   enforced this, but the security boundary does not get to assume its
+   caller parsed anything — a firmware port doing streaming/incremental
+   parsing would land squarely in this hole.
+2. **Duplicate outpoints** (V6). A PSBT spending the same UTXO twice is
+   well-formed and parses cleanly, so this one is reachable through the
+   normal air-gapped flow. Its value was counted twice into the
+   displayed input total and therefore the displayed fee, and the
+   resulting transaction is consensus-invalid. Now refused.
+3. **Signature-slot squatting** (S1). The signer skipped any input that
+   already had a signature under its own key. A coordinator could
+   pre-fill that slot with garbage, and the device would report success
+   — and emit a CAAP attestation record — for a signing it never
+   performed. Now the signer always signs; RFC 6979 determinism makes
+   re-signing legitimate input a no-op.
+4. **Change beyond the gap limit** (V7). Change sent to a genuinely-ours
+   address at, say, index 2,000,000 verifies perfectly against the
+   policy — and no wallet rescan will ever find it. Signing it strands
+   the funds. Now capped (`DEFAULT_MAX_CHANGE_INDEX`); firmware that
+   tracks its own address counter should tighten this further.
+5. **Signature clobbering in `combine`** (C1, found only by the
+   reference implementation). `combine` did `partial_sigs.update(...)`,
+   so a later PSBT copy could silently overwrite a *valid* signature
+   with a forged one. Now conflicting signatures for the same key on
+   the same input are a hard error.
+6. **`finalize` assembled unverified signatures** (C1). Signatures
+   arrive through an untrusted coordinator, and finalization trusted
+   them, producing transactions that look complete but the network
+   rejects — with nothing to indicate which signer was at fault.
+   `finalize` now verifies every signature against the BIP-143 digest
+   before it goes into a witness.
+
+### Parser findings
 
 1. **Unbounded varint → `OverflowError`** (mutational, P1). An 8-byte
    compact-size length reached `read()` as an absurd allocation size.

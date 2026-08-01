@@ -15,7 +15,8 @@ hold.
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Phases 0–3 and the parked v2 research tracks |
 | [`swsigner/`](swsigner/) | The software signer, coordinator, and attestation |
 | [`swsigner/tests/`](swsigner/tests/) | Standards vectors + adversarial suite |
-| [`fuzz/`](fuzz/) | Mutational + differential (vs embit) parser fuzzing |
+| [`fuzz/`](fuzz/) | Parser fuzzing + semantic fuzzing of the verification engine |
+| [`interop/`](interop/) | Cross-implementation co-signing, consensus oracle, signet CLI |
 
 ## Run it
 
@@ -24,7 +25,7 @@ pure-Python RIPEMD-160, MIT).
 
 ```bash
 cd hardware-wallet
-python3 -m unittest discover -s swsigner/tests -t .   # 35 tests
+python3 -m unittest discover -s swsigner/tests -t .   # 45 tests
 python3 -m swsigner.demo                              # 2-of-3 quorum spend
 ```
 
@@ -54,10 +55,26 @@ exists.
   numbers, and never reuse a session key.
 - **BIP-174 conformance + fuzzing** (`test_bip174_vectors.py`,
   [`fuzz/`](fuzz/)): the full published vector set passes, and the
-  parsers have survived ~500k mutational inputs plus ~100k differential
-  inputs against embit with zero open findings — see
-  [`fuzz/README.md`](fuzz/README.md) for the six parser bugs the
-  campaign found and fixed.
+  parsers have survived ~600k mutational inputs plus ~115k differential
+  inputs against embit.
+- **The display is honest, under adversarial search**
+  ([`fuzz/fuzz_verify.py`](fuzz/fuzz_verify.py)): a semantic fuzzer
+  holds ground truth about the real UTXO set and asserts that whenever
+  the signer agrees to sign, every number and address it displayed was
+  true — no hidden outputs, honest fee and input totals, change
+  provably ours and reachable, signatures bound to exactly the
+  displayed transaction.
+- **Cross-implementation agreement** ([`interop/`](interop/)): embit
+  co-signs our PSBTs as an independent vendor-B stack and derives
+  identical addresses from our descriptor; every finalized transaction
+  is re-validated by python-bitcoinlib's deserializer, BIP-143, and
+  libsecp256k1 ECDSA.
+
+Twelve real defect classes have been found and fixed by this tooling so
+far — six in the parsers, six in the verification/signing path, several
+of which would have let a malicious coordinator move funds to an address
+the user never saw. [`fuzz/README.md`](fuzz/README.md) documents each
+one.
 
 ## What this is not
 

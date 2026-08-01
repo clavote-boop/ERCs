@@ -79,8 +79,11 @@ class SoftSigner:
                 raise Refusal("not-our-input",
                               f"input {vin.index}: our key is not in the "
                               "reconstructed quorum script")
-            if our_pubkey in psbt.inputs[vin.index].partial_sigs:
-                continue
+            # Always sign, even if a signature already sits in our slot.
+            # Skipping would let a coordinator squat the slot with a
+            # bogus signature and suppress signing entirely while the
+            # device reported success. Our signature is deterministic
+            # (RFC 6979), so re-signing legitimate input is a no-op.
             digest = bip143_sighash(psbt.tx, vin.index, vin.script_code,
                                     vin.amount, SIGHASH_ALL)
             r, s = secp256k1.sign(child.privkey, digest)

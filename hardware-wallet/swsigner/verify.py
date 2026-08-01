@@ -91,10 +91,17 @@ class DisplayFacts:
 
 DEFAULT_MAX_FEE_SATS = 1_000_000        # 0.01 BTC — hard ceiling
 DEFAULT_MAX_FEERATE = 500               # sat/vB — hard ceiling
+# Change may only land on an address index a wallet will realistically
+# rescan. An output at, say, index 2_000_000 is genuinely ours and will
+# verify against the policy — but no wallet's gap-limit scan will ever
+# reach it, so accepting it means signing away the funds. Coarse guard;
+# firmware that tracks its own address counter should tighten this.
+DEFAULT_MAX_CHANGE_INDEX = 100_000
 
 
 def verify_psbt(psbt: PSBT, policy, *, max_fee_sats=DEFAULT_MAX_FEE_SATS,
-                max_feerate=DEFAULT_MAX_FEERATE):
+                max_feerate=DEFAULT_MAX_FEERATE,
+                max_change_index=DEFAULT_MAX_CHANGE_INDEX):
     """Full independent verification. Returns (DisplayFacts,
     [VerifiedInput]) or raises Refusal. Never trusts a coordinator
     assertion it can re-derive."""
@@ -103,6 +110,36 @@ def verify_psbt(psbt: PSBT, policy, *, max_fee_sats=DEFAULT_MAX_FEE_SATS,
         raise Refusal("empty-tx", "transaction has no inputs")
     if not tx.vout:
         raise Refusal("empty-tx", "transaction has no outputs")
+
+    # The signer must see EVERY input and output of the transaction it
+    # signs. A PSBT whose per-input/per-output maps do not cover the
+    # transaction one-for-one would let the parts beyond the shorter
+    # list go unverified and undisplayed while the BIP-143 sighash still
+    # commits to them — money moving to an address the user never saw.
+    # The BIP-174 parser already enforces this, but the guarantee is
+    # asserted here too: this is the security boundary, and it does not
+    # get to assume its caller parsed anything.
+    if len(psbt.inputs) != len(tx.vin):
+        raise Refusal("psbt-structure",
+                      f"{len(tx.vin)} transaction inputs but "
+                      f"{len(psbt.inputs)} PSBT input records")
+    if len(psbt.outputs) != len(tx.vout):
+        raise Refusal("psbt-structure",
+                      f"{len(tx.vout)} transaction outputs but "
+                      f"{len(psbt.outputs)} PSBT output records")
+
+    # Spending one outpoint twice is consensus-invalid, and it would
+    # double-count that UTXO's value into the displayed input total and
+    # fee. Refuse rather than show the user numbers that cannot be true.
+    seen_outpoints = set()
+    for i, txin in enumerate(tx.vin):
+        key = (txin.prevout.txid_le, txin.prevout.vout)
+        if key in seen_outpoints:
+            raise Refusal("duplicate-input",
+                          f"input {i} spends outpoint "
+                          f"{txin.prevout.txid}:{txin.prevout.vout}, "
+                          "already spent by an earlier input")
+        seen_outpoints.add(key)
 
     verified_inputs = []
     display_inputs = []
@@ -184,6 +221,12 @@ def verify_psbt(psbt: PSBT, policy, *, max_fee_sats=DEFAULT_MAX_FEE_SATS,
                               " but its script does not match the "
                               "reconstruction from registered xpubs")
             if branch == 1:
+                if index > max_change_index:
+                    raise Refusal("change-unreachable",
+                                  f"output {o} sends change to index "
+                                  f"{index}, beyond any practical gap "
+                                  "limit — the wallet would not find "
+                                  "these funds again")
                 change.append((to_address(txout.script_pubkey, policy.network),
                                txout.value, f"1/{index}"))
                 continue
