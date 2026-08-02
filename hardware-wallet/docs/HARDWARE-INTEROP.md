@@ -1,5 +1,30 @@
 # Bringing a real device into the quorum
 
+## Session checklist
+
+Everything needed at the machine, in order. Details for each step are
+below.
+
+- [ ] Sparrow installed; launched on **Signet** (`sparrow -n signet`, or
+      File → Preferences → Server; changing network needs a restart)
+- [ ] Server set to **Public Server** — an Umbrel/Knots node is mainnet
+      and cannot serve signet
+- [ ] Jade in **testnet/signet mode**, seed backup verified beforehand
+- [ ] Sparrow → File → New Wallet → Policy Type **Multi Signature**,
+      Script Type **Native Segwit (P2WSH)** → add the Jade as a cosigner
+- [ ] Copy its key origin line: `[fingerprint/48h/1h/0h/2h]tpub…`
+- [ ] `hardware_interop quorum --device "<that line>"` → gives you a
+      descriptor, a multisig config file, and a deposit address
+- [ ] Import the config into Sparrow and **register it on the Jade**
+- [ ] Fund the deposit address from https://signetfaucet.com
+- [ ] `hardware_interop psbt --to <addr>` → sign on the Jade → compare
+      its screen against what our signer printed
+- [ ] `hardware_interop verify --psbt signed.psbt`
+
+The comparison in the second-to-last step is the experiment. Everything
+else is setup.
+
+
 The Phase-1 gate that software interop cannot reach: a signature from an
 independently manufactured device, approved on its own screen, validated
 by our stack.
