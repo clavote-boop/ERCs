@@ -57,6 +57,31 @@ them. The tooling hard-refuses mainnet for exactly this reason. A real
 wallet needs three keys generated on real devices, none from this
 repository.
 
+## Sparrow setup, and what your own node can and cannot do here
+
+Sparrow is the coordinator for this exercise: it talks to the Jade over
+USB, registers the multisig policy on it, and relays the PSBT.
+
+**Your own node is the right long-term answer, but it probably cannot
+serve this test.** An Umbrel Bitcoin Knots node is a *mainnet* node. It
+has no signet chainstate, so pointing Sparrow at it while Sparrow is in
+signet mode will simply fail to sync. For the signet exercise, set
+Sparrow's server to its **Public Server** option while the network is
+Signet — that reaches public signet Electrum servers and needs nothing
+from Umbrel.
+
+That privacy trade-off is irrelevant here: the wallet holds valueless
+coins and its seeds are published in this repository. For a real
+wallet, connect Sparrow to your own node — that is exactly the
+"untrusted coordinator, trusted verification" split this architecture
+is built around, and running your own node is the strongest version of
+it.
+
+Sparrow's network is chosen at startup: **File → Preferences → Server**,
+or launch with `sparrow -n signet`. Changing it requires a restart, and
+Sparrow keeps separate wallet lists per network, so your mainnet wallets
+will not appear while in signet mode. That is expected.
+
 ## Getting the key out of a Jade
 
 Jade is designed to be driven by a companion app; Sparrow is the

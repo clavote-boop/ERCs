@@ -23,6 +23,10 @@ on:
       sats:
         description: "faucet amount in sats"
         default: "100000"
+      broadcast:
+        description: "actually spend coins (default: dry run)"
+        type: boolean
+        default: false
   push:
     branches: [clavote-signer-main, main]
     paths:
@@ -75,14 +79,18 @@ jobs:
         run: |
           python -m interop.signet_interop --network "$NETWORK" \
             probe --sats "$SATS"
-      # Fund the deposit address once (see the skip message for how) and
-      # every later run completes the full loop unattended. FAUCET_TOKEN
-      # is optional; without it an unfunded wallet skips rather than
-      # fails, since that is a missing precondition, not a signer defect.
-      - name: Fund, verify, co-sign, broadcast, confirm
+      # A DRY RUN by default: real UTXOs, real amounts, both signers and
+      # the reference-implementation check all run, but nothing is
+      # broadcast, so the test wallet survives. Broadcasting is opt-in
+      # via workflow_dispatch, since coins on a faucet-gated network are
+      # a finite resource. FAUCET_TOKEN is optional; an unfunded or
+      # drained wallet skips rather than fails, being a missing
+      # precondition rather than a signer defect.
+      - name: Verify and co-sign against live chain data
         timeout-minutes: 12
         env:
           FAUCET_TOKEN: ${{ secrets.FAUCET_TOKEN }}
         run: |
           python -m interop.signet_interop --network "$NETWORK" \
-            auto --yes --sats "$SATS" --wait-minutes 5 --confirm-minutes 4
+            auto --yes --sats "$SATS" --wait-minutes 5 --confirm-minutes 4 \
+            ${{ inputs.broadcast && '--broadcast' || '' }}

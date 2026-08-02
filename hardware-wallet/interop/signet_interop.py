@@ -302,6 +302,17 @@ def spend(args, cfg, utxos, signer_a, signer_b, policy):
     except ImportError:
         pass
 
+    if not args.broadcast:
+        # Everything above already exercised the full stack against real
+        # chain data — real UTXOs, real amounts, two independent signers
+        # and a reference-implementation check. Broadcasting is the only
+        # step that costs coins, so it is opt-in and the test wallet
+        # survives for the next run.
+        print(f"\nDRY RUN — not broadcasting (pass --broadcast to spend)")
+        print(f"would-be txid: {final.txid}")
+        print(f"raw transaction:\n{final.serialize().hex()}")
+        return final.txid
+
     txid = api(base, "/tx", data=final.serialize().hex().encode()).decode()
     print(f"BROADCAST ACCEPTED: {txid}")
     print(f"explorer: {cfg['explorer']}/tx/{txid}")
@@ -374,6 +385,9 @@ def main():
         p.add_argument("--confirm-minutes", type=int, default=6)
         p.add_argument("--require-funds", action="store_true",
                        help="treat an unfunded wallet as a failure")
+        p.add_argument("--broadcast", action="store_true",
+                       help="actually spend: broadcast and await "
+                            "confirmation (default is a dry run)")
         if name == "auto":
             p.add_argument("--sats", type=int, default=FAUCET_SATS)
             p.add_argument("--wait-minutes", type=int, default=10)
