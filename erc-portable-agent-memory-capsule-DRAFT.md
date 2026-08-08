@@ -82,9 +82,9 @@ All operands are raw bytes: `record_id_i` and `payload_hash_i` are the 32-byte v
 
 `owner_signature` is computed over the canonical manifest with the `owner_signature` field removed.
 
-**`eip-191`** — [EIP-191](./eip-191.md) personal-message signing: input `"\x19Ethereum Signed Message:\n" ‖ len(msg) ‖ msg` where `msg` is the canonical manifest JSON; keccak-256; 65-byte `r‖s‖v`. The recovered address MUST be a listed controller.
+**`eip-191`** — [ERC-191](./eip-191.md) personal-message signing: input `"\x19Ethereum Signed Message:\n" ‖ len(msg) ‖ msg` where `msg` is the canonical manifest JSON; keccak-256; 65-byte `r‖s‖v`. The recovered address MUST be a listed controller.
 
-**`eip-712`** — [EIP-712](./eip-712.md) typed data, for wallet-inspectable signing:
+**`eip-712`** — [ERC-712](./eip-712.md) typed data, for wallet-inspectable signing:
 
 ```solidity
 struct CapsuleCommit {
@@ -97,7 +97,7 @@ struct CapsuleCommit {
 }
 ```
 
-Domain: `{ name: "AgentMemoryCapsule", version: "2", chainId, verifyingContract }` where `verifyingContract` is the anchor registry (§6) or the zero address when unanchored. EIP-712 itself provides no replay protection; the `nonce` field and single-use rule above supply it. Contract-account controllers are verified per [ERC-1271](./eip-1271.md).
+Domain: `{ name: "AgentMemoryCapsule", version: "2", chainId, verifyingContract }` where `verifyingContract` is the anchor registry (§6) or the zero address when unanchored. ERC-712 itself provides no replay protection; the `nonce` field and single-use rule above supply it. Contract-account controllers are verified per [ERC-1271](./eip-1271.md).
 
 `CapsuleCommit` is the *signing view* of the manifest, not a separate commitment primitive: `merkleRoot` MUST equal the manifest's `merkle_root` — the same value emitted in `CapsuleAnchored` (§6) — so the signature, the manifest, and the anchor all bind one commitment, and a relying party verifying any one of them is verifying the same tree.
 
