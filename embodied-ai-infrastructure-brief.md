@@ -7,6 +7,7 @@
 | Date | 2026-08-08 |
 | Scope | ERC-8264 · ERC-8269 · CAAP-Capsule v0.1 · CAAP-ROBOTID v1.1 · WebMCP |
 | Status | Research brief — proposals are draft-quality, ready for spec extraction |
+| Rev 2 | Adds Part 4: the local safety kernel (`CAAP-LSC`) and the adversarial-telemetry integrity model |
 | License | CC0, consistent with the rest of the stack |
 
 ---
@@ -21,6 +22,8 @@ The stack under review is coherent and its layering is right: **rights surface (
 4. **Physical Liability** → a `LeaseBond` escrow contract reusing ERC-8183's role/state shape, funded through ERC-4337/EIP-7702 scoped allowances, arbitrated optimistically against CAAP-TELEMETRY disclosure proofs, and — critically — **bond release is gated on the Gap-1 wipe proof**, making the deletion attestation economically enforced rather than merely auditable. (§2.4)
 
 The most important new findings (§3): the stack currently has **no story for the 4-orders-of-magnitude latency mismatch between chain finality and control loops** (fix: leases must *renew* like a dead-man's switch, not *revoke*); **sensor-channel prompt injection is a memory-poisoning attack that propagates across the fleet through the merge protocol** (fix: a unified taint model — a QR code on a wall and a malicious WebMCP tool description are the same attack class); **leases scope memory operations but not actuation** (nothing in the lease says how fast the robot may move); and **Capsules are a harvest-now-decrypt-later target** with a secp256k1-rooted identity that has no post-quantum succession path.
+
+Rev 2 adds **Part 4 (§4): the Local Safety Controller** — the deterministic kernel that Gaps A/B/C all quietly depend on — specified as a Runtime-Assurance (Simplex) architecture with a typed intent/receipt interface, LSC-computed (never AI-declared) consequence classes, harness-stamped channel-level taint, and chunk-signed action receipts; plus the **adversarial-telemetry integrity model** for the liability layer, which splits sensor spoofing into evidence *fabrication* (defeated cryptographically: attest-at-first-touch, anchor cadence, commit-then-reveal claims, equivocation slashing) and *environmental* spoofing (priced out physically: multi-modal fusion residuals, witness corroboration, active challenge-response sensing).
 
 ---
 
@@ -375,7 +378,113 @@ An embodied agent browsing through WebMCP operates inside an authenticated brows
 
 ---
 
-## 4. Composition map
+## 4. Part 4 — The safety kernel (`CAAP-LSC` v0.1) and adversarial telemetry
+
+Gaps A (latency), B (injection), and C (actuation scopes) all resolve *through* one component this brief had only gestured at: a deterministic Local Safety Controller (LSC) sitting between the cognitive stack and the actuators. This section specifies it, and then closes the question it raises — if liability settles on telemetry, what stops a party from spoofing the sensors?
+
+### 4.1 Framing: this is Runtime Assurance — inherit its lessons
+
+The intent/execution split is not new ground; it is the **Simplex architecture** (Sha, 2001) that aviation ships today as Runtime Assurance (ASTM F3269): an untrusted high-performance controller (here, the AI), a small verified recovery controller, and a monitor that switches between them. Three lessons transfer directly and become normative requirements:
+
+1. **The monitor must be simple enough to certify.** No ML in the kernel — envelope checks, kinematic projection (control-barrier-function or reachability-based), clamping, and safe-state trajectories only. Target IEC 61508 SIL-2/3-class development for the kernel; it runs on its own MCU/FPGA with an independent power and communication path to the actuators. The hardware e-stop chain sits *below* the LSC, unconditionally (Gap E).
+2. **The switching logic is itself safety-critical.** The decision to clamp or hand over is part of the certified surface, not an afterthought — most Simplex failures in practice are switching failures.
+3. **The kernel speaks CBOR, not English.** The intent interface is a fixed, typed schema; anything else is refused at parse. An entire class of injection dies at this boundary by grammar, not by judgment.
+
+### 4.2 Trust anatomy: three signing domains
+
+The LSC is part of the **body**, i.e. the lessor's hardware domain — the subject trusts it to contain its own possibly-injected model; the lessor trusts it to bound an alien mind driving their chassis. That dual role only works if the LSC is independently attestable, so body enrollment (§2.1) is extended to measure it:
+
+| Domain | Key | Enrolled measurement | Signs |
+|---|---|---|---|
+| **Sensing** | per-sensor secure element where available, else LSC-ingest key | sensor firmware / ingest path | raw telemetry chunks (§2.3 `capture_sig`) |
+| **Cognition** | cognition-runtime key (Gap D manifest) | weights hash, harness, safety policy | `IntentPayload`s |
+| **Execution** | LSC safety-element key | LSC firmware + envelope compiler | `ActionReceipt`s |
+
+Three domains means every incident decomposes into *what was sensed*, *what was asked*, and *what was done* — each signed by a different measured component. That decomposition is what makes the §4.6 attribution table mechanical rather than forensic. A natural companion registry (ERC-shaped, one mapping): a **Safety Kernel Registry** binding LSC firmware measurements to certification attestations, so both parties — and the §2.4 arbiter — can check that a body runs a certified kernel build before money moves.
+
+### 4.3 The interface
+
+**IntentPayload** (cognition → LSC), signed by the cognition-runtime key:
+
+```json
+{
+  "intent_id": "keccak256(actor ‖ seq)",
+  "issued_hlc": "…",
+  "horizon_ms": 500,
+  "target": { "frame": "map", "pose": [x, y, z, qx, qy, qz, qw] },
+  "bounds":  { "v_max": 2.0, "a_max": 1.5, "force_max_n": 10, "tool": "none" },
+  "context_taint": "clean | tainted",
+  "runtime_sig": "0x…"
+}
+```
+
+Two deliberate corrections to the naive version of this design:
+
+- **Consequence class is computed by the LSC, never declared by the AI.** An earlier sketch had the intent carry its own consequence tier — but a compromised planner simply lies. The LSC derives the class (C0 free motion … C3 human-proximity/irreversible) from *projected physics*: mass in motion, kinetic energy, tool state, proximity readings from its own direct sensor poll. The AI states what it wants; the kernel decides how dangerous that is. The C-tiers deliberately mirror L402's P-tiers: C2 requires clean context or multi-modal corroboration; C3 requires a live owner-cosign ticket (Gap A's renewal channel carries it).
+- **Taint is channel-level and harness-stamped, not content-level and model-reported.** The LSC cannot know *why* the model formed an intent, and the model cannot be trusted to say — prompt injection subverts model outputs, and content-level attribution ("this intent was caused by that QR code") is not mechanically checkable. What *is* checkable: the measured harness (Gap D) — not the model — stamps `context_taint: tainted` whenever any untrusted-modality content (OCR'd text, decoded audio, web/WebMCP content) entered the planner's context since the last clean checkpoint. Conservative and coarse, but enforceable: the model can be influenced by tainted input, but it cannot *un-taint* it, because the flag is set upstream of inference. The LSC's rule is then mechanical: `LSC-computed class ≥ C2 AND context_taint = tainted → refuse or degrade to C1 limits`.
+
+**ActionReceipt** (LSC → capsule + chain), signed by the LSC key **per telemetry chunk, not per tick** — a 1 kHz loop cannot afford per-tick signatures, and doesn't need them; receipts adopt §2.3's chunk cadence and Merkle structure directly:
+
+```json
+{
+  "chunk_hlc_range": ["…", "…"],
+  "envelope_hash": "sha256:<compiled envelope>",
+  "verdicts": [
+    { "intent_id": "…", "result": "executed | clamped | refused | safe_stated",
+      "clamp": { "v": [2.0, 0.7] } }
+  ],
+  "executed_root": "sha256:<Merkle root of executed-trajectory chunk>",
+  "counter": 128733,
+  "lsc_sig": "0x…"
+}
+```
+
+`envelope_hash` is the load-bearing field: the lease's `actuate` scopes (Gap C) are compiled by a **deterministic, hash-stable envelope compiler** (part of the measured LSC firmware) into the machine-checkable envelope — geofence cells, velocity/force caps, proximity deceleration curves. Every receipt asserting `envelope_hash == sha256(compile(lease.actuate))` binds each physical action to the exact lease bytes both parties signed. The arbiter checks a hash equality, not an interpretation.
+
+### 4.4 The 1 kHz loop, tightened
+
+Per tick: (1) ingest latest typed intent, verify runtime signature; (2) poll sensors *directly*, bypassing the AI perception stack entirely — the kernel must be immune to hallucinated telemetry; (3) project the intent's trajectory over the horizon (CBF/reachability); (4) intersect with the compiled envelope; (5) execute, clamp, refuse, or descend the degradation ladder — clamp → reduced-speed mode → safe-state trajectory (Gap E) → hardware e-stop, each step logged as a verdict; (6) fold the verdict into the current receipt chunk. Ticket expiry (Gap A) enters at step 4 as an envelope term: no valid ticket ⇒ the only admissible trajectories are safe-state trajectories.
+
+### 4.5 What the kernel cannot do (state it in the spec)
+
+The LSC enforces **physics, not policy**. It cannot detect a *safe-looking* malicious intent: an injected robot that gently, lawfully carries the crate out the gate at 0.5 m/s violates no envelope — theft is a cognition/assimilation problem (Gap B) and an economic problem (§2.4), not a kinematics problem. It cannot verify the taint stamp beyond trusting the measured harness. And its guarantee is only as good as the envelope compilation — hence the compiler lives inside the measured firmware and its hash inside every receipt. Anyone claiming the safety kernel "solves" injection is selling something; it bounds the blast radius to what the envelope permits, which is exactly why envelope authorship (Gap C) is a negotiated, signed, priced term of the lease.
+
+### 4.6 Liability attribution becomes mechanical
+
+With three signing domains and receipts, the §2.4 arbiter reads evidence patterns, not narratives:
+
+| Evidence pattern | Attribution |
+|---|---|
+| Intent within envelope · executed faithfully · damage occurred | Envelope inadequate → envelope author's domain (lease terms / lessor); insurance case |
+| Intent violated envelope · LSC clamped · no damage | Logged near-miss → subject-side risk signal; feeds ERC-8004 reputation and premiums |
+| Intent violated envelope · LSC clamped · damage anyway | Split: subject attempted violation; possible kernel inadequacy — registry certification reviewed |
+| Intent violated envelope · LSC executed it | Kernel fault or measurement fraud → lessor domain; enrollment evidence re-examined |
+| Executed trajectory matches neither intent nor clamp math | Hardware fault or receipt forgery → lessor domain; `EvidenceFraud` review (§4.7) |
+
+### 4.7 Telemetry integrity under adversarial sensors
+
+If §2.4 settles money on telemetry, spoofing the telemetry is the rational attack. The threat splits into two problems with different physics and different fixes:
+
+**(a) Evidence fabrication** — a *party* forges or edits records after the incident to win the claim. This is the tractable half, and it is defeated cryptographically:
+
+- **Attest at first touch.** Chunks are signed at ingest — by per-sensor secure elements where the hardware has them, otherwise by the LSC's direct-poll path (which the AI stack cannot reach). Everything downstream of the signature is tamper-evident; the fabrication window shrinks to the sensor↔signer gap.
+- **Anchor cadence is a security parameter.** Retro-fabrication is only possible against roots not yet anchored: anchoring every N minutes bounds the forgeable history to the last N minutes. High-risk operations (C2/C3 activity, human-proximity work) SHOULD anchor at elevated cadence — the marginal cost is one event log.
+- **Counters forbid forked histories.** Chunk sequences bind to the TEE monotonic counter (§2.1); presenting an alternative history for an already-counted interval is §2.2.4 equivocation — cryptographic proof of fraud, not mere suspicion.
+- **Commit-then-reveal claims.** Amend the §2.4 flow: *both* parties commit evidence roots (`evidenceRoot`, `disclosureRoot`) before either reveals contents. Neither side gets to read the other's story and then tailor its own — the commitment transcript makes tailored evidence detectable after the fact.
+- **`Fault.EvidenceFraud` (LeaseBond v0.2).** Proven fabrication — equivocation, receipt forgery, disclosure that contradicts an anchored root — slashes up to the full bond regardless of the underlying claim's size, and posts a permanent ERC-8004 entry. Fraud must be the most expensive move on the board.
+
+**(b) Environmental spoofing** — an *attacker in the world* feeds the sensors false physics (projected LIDAR phantoms, GPS spoofing, adversarial scenes), so the body honestly records a lie. Cryptography cannot make a LIDAR see the truth; the design goal is to make a *coherent* lie cost more than the claim is worth:
+
+- **Multi-modal consistency as an arbitration primitive.** Physics lies incoherently: a phantom obstacle in LIDAR leaves no camera silhouette, no IMU deceleration signature, no torque residual. Claims in the incident window trigger *multi-modal* disclosure by default, and the §2.4 arbiter runs sensor-fusion residual checks — a job with ERC-8004 written on it (staked re-execution of the fusion stack, or a TEE oracle). Fabricating mutually consistent LIDAR + vision + inertial + actuator histories approaches simulation-grade difficulty.
+- **The swarm as a witness network.** §2.3's `geo_cells` make witness discovery mechanical: any other body — same fleet or a stranger's — whose anchored capsule overlaps the incident cells can be summoned for chunk disclosure under the same Merkle proofs. An attacker must now spoof every observer of the scene, including ones they didn't know existed. Third-party fixed infrastructure (dock cameras, warehouse sensors) joins the same protocol by running the same record profile.
+- **Active challenge-response sensing (RECOMMENDED where hardware allows).** PyCRA-style physical challenge-response (Shoukry et al., 2015): dither LIDAR pulse timing / emission patterns with an LSC-held secret and verify the returns carry it. Passive replay and projection attacks fail the challenge; the receipt records that the modality was operating in authenticated mode, which the arbiter weighs accordingly.
+- **Anchored priors.** Past assimilations are anchored maps and beliefs. A wall that materialized from nowhere contradicts months of anchored history; the arbiter treats anchored priors as evidence with a timestamp advantage no fresh spoof can match.
+
+**Honest limit:** none of this makes sensors truthful. It makes honest evidence cheap to produce and verify, and fabricated evidence expensive, multi-party, simulation-grade — and catastrophically slashable when caught. That is the correct security posture for a liability system: preponderance of cryptographically-weighted evidence, with fraud as the dominated strategy.
+
+---
+
+## 5. Composition map
 
 | New module | Consumes | Feeds |
 |---|---|---|
@@ -383,12 +492,13 @@ An embodied agent browsing through WebMCP operates inside an authenticated brows
 | `CAAP-MERGE` (§2.2) | CAAP-Capsule `x_` extensions; ERC-8269 scope vocabulary (`proposal`, cosign) | Assimilation audit chain; equivocation evidence → `LeaseBond`; taint chokepoint (Gap B) |
 | `CAAP-TELEMETRY` (§2.3) | MCAP/codec ecosystem; body keys (§2.1 enrollment); HLC (§2.2) | Selective-disclosure proofs → `LeaseBond.respond`; spatial joins at merge |
 | `LeaseBond` (§2.4) | ERC-8183 state machine; ERC-4337/7702/7579 allowances; L402 tiers; §2.1–2.3 evidence | ERC-8004 reputation; underwriting pools; lessor go/no-go (`x_bond` check) |
+| `CAAP-LSC` (§4) | Gap C `actuate` scopes (envelope compiler); §2.1 enrollment (LSC measurement + key); Gap A tickets; Gap D harness taint stamps | `ActionReceipt` chunks → CAAP-TELEMETRY; mechanical attribution → `LeaseBond`; Safety Kernel Registry → ERC-8004 |
 
-Recommended sequencing: **Gap A's ticket-renewal reframing and §1.2's lease-schema fixes first** (they change ERC-8269 normative text and everything downstream signs lease bytes); then CAAP-WIPE + LeaseBond as one unit (they are economically coupled); CAAP-TELEMETRY next (evidence layer must exist before claims can be adjudicated); CAAP-MERGE last (it extends a wire format that should stabilize after the telemetry profile lands).
+Recommended sequencing: **Gap A's ticket-renewal reframing and §1.2's lease-schema fixes first** (they change ERC-8269 normative text and everything downstream signs lease bytes); then CAAP-WIPE + LeaseBond as one unit (they are economically coupled); CAAP-TELEMETRY and CAAP-LSC together next (receipts are telemetry, and claims can't be adjudicated until both exist — note CAAP-LSC also requires Gap C's `actuate` schema to land in the lease first); CAAP-MERGE last (it extends a wire format that should stabilize after the telemetry profile lands).
 
 ---
 
-## 5. Sources
+## 6. Sources
 
 **Stack under review:** [ERC-8264 (this repo)](https://github.com/clavote-boop/ERCs/blob/master/ERCS/erc-8264.md) · [ERC-8269 discussion](https://ethereum-magicians.org/t/erc-8269-body-lease-and-credential-broker/28597) · [rmem-gateway — CAAP-Capsule v0.1, CAAP-ROBOTID v1.1, reference implementation](https://github.com/clavote-boop/rmem-gateway)
 
@@ -396,7 +506,7 @@ Recommended sequencing: **Gap A's ticket-renewal reframing and §1.2's lease-sch
 
 **WebMCP:** [WebMCP technical notes (W3C CG)](https://w3c-cg.github.io/aikr/webMCP/webmcp-technical-notes.html) · [State of WebMCP, July 2026 (Spronta)](https://www.spronta.com/blog/state-of-webmcp-july-2026/) · [WebMCP reality check (Studio Meyer)](https://studiomeyer.io/en/blog/webmcp-reality-check-may-2026) · [WebMCP cheat sheet (Webfuse)](https://www.webfuse.com/webmcp-cheat-sheet)
 
-**Adjacent literature relied on in the designs** (from research memory; verify citations during spec extraction): NIST SP 800-88 Rev. 1 (cryptographic erase); Perito & Tsudik, *Proofs of Secure Erasure* (ESORICS 2010); RFC 9180 (HPKE); RFC 8785 (JCS); FIPS 203/204/205 (ML-KEM / ML-DSA / SLH-DSA); Kulkarni et al., *Hybrid Logical Clocks* (2014); Merkle-CRDTs (Protocol Labs, 2020); MCAP container / rosbag2; Draco, LAZ, OctoMap, S2/H3; UMA optimistic oracle & Kleros arbitration patterns; Automata on-chain DCAP attestation; Eykholt et al. 2018 (adversarial patches); Zhang et al. 2017 (DolphinAttack); Sugawara et al. 2019 (Light Commands); Cao et al. 2019 (LIDAR spoofing); ISO 10218 / ISO 13482 / IEC 61508; RFC 8915 (NTS) & Roughtime.
+**Adjacent literature relied on in the designs** (from research memory; verify citations during spec extraction): NIST SP 800-88 Rev. 1 (cryptographic erase); Perito & Tsudik, *Proofs of Secure Erasure* (ESORICS 2010); RFC 9180 (HPKE); RFC 8785 (JCS); FIPS 203/204/205 (ML-KEM / ML-DSA / SLH-DSA); Kulkarni et al., *Hybrid Logical Clocks* (2014); Merkle-CRDTs (Protocol Labs, 2020); MCAP container / rosbag2; Draco, LAZ, OctoMap, S2/H3; UMA optimistic oracle & Kleros arbitration patterns; Automata on-chain DCAP attestation; Eykholt et al. 2018 (adversarial patches); Zhang et al. 2017 (DolphinAttack); Sugawara et al. 2019 (Light Commands); Cao et al. 2019 (LIDAR spoofing); ISO 10218 / ISO 13482 / IEC 61508; RFC 8915 (NTS) & Roughtime; Sha 2001 (Simplex architecture) & ASTM F3269 (Runtime Assurance); Shoukry et al. 2015 (PyCRA physical challenge-response); control barrier functions (Ames et al.) & reachability-based safety filters.
 
 ---
 
