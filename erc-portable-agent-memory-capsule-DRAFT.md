@@ -8,7 +8,7 @@ status: Draft
 type: Standards Track
 category: ERC
 created: 2026-08-08
-requires: 191, 712, 1271
+requires: 191
 ---
 
 ## Abstract
@@ -26,7 +26,7 @@ A standard Capsule format provides:
 - **Portability** — any conforming gateway can import another's export;
 - **Integrity** — a Merkle commitment allows any record to be verified against the manifest, and the manifest against an on-chain anchor, without trusting the exporting platform;
 - **Auditability** — anchored roots with parent links give an agent's memory a verifiable history, usable in dispute contexts;
-- **Confidentiality by construction** — the Capsule commits only to ciphertext; keys never travel with the payload.
+- **Ciphertext-only commitment** — the manifest commits to ciphertext and carries no keys. What this ERC guarantees is commitment integrity over encrypted payloads; confidentiality itself is a property of the implementation's encryption envelope, not of this format.
 
 ## Specification
 
@@ -34,10 +34,13 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 ### 1. Capsule structure
 
-A Capsule is a directory or archive containing:
+A Capsule consists of a manifest and its encrypted record payloads. Storage layout is implementation-defined (e.g. a directory holding `manifest.json` and `records/<recordId>.enc` files). Interchange is not: the **canonical Capsule encoding** is
 
-- `manifest.json` — a canonical-JSON object (§2), signed under a suite from §4;
-- `records/<recordId>.enc` — encrypted payload files, one per entry in the manifest's `record_index`.
+```solidity
+abi.encode(bytes canonicalManifest, bytes[] ciphertexts)
+```
+
+where `canonicalManifest` is the RFC 8785 canonical manifest bytes (§2) and `ciphertexts[i]` is the exact ciphertext whose SHA-256 equals `record_index[i].payload_hash`, in `record_index` order. Verifiers MUST reject an encoding whose ciphertext count, order, or hashes differ from `record_index`.
 
 ### 2. Manifest
 
@@ -66,6 +69,10 @@ A Capsule is a directory or archive containing:
 - `parent_roots` (OPTIONAL) lists the `merkle_root` values of predecessor Capsule states, forming a lineage DAG. An empty or absent list denotes a genesis export.
 - Extension fields prefixed `x_` MAY be included; importers MUST NOT reject a Capsule solely for unrecognized `x_` fields.
 
+**Closed schema.** The manifest's fields are exactly: REQUIRED `capsule_version`, `subject`, `controllers`, `created_at`, `nonce`, `signature_suite`, `record_index`, `merkle_root`, `owner_signature`; OPTIONAL `parent_roots`; `signature_domain` per its rule above; plus `x_`-prefixed extensions. Verifiers MUST reject a manifest containing any other field.
+
+**Exact encodings.** `nonce`, `merkle_root`, every `record_id` and `payload_hash`, and every `parent_roots` entry are exactly 32 bytes, rendered as `0x` followed by 64 lowercase hex characters; `subject` and `verifying_contract` are 20 bytes as `0x` + 40 lowercase hex. Verifiers MUST reject other lengths or uppercase hex. `parent_roots` MUST be sorted ascending byte-wise and MUST NOT contain duplicates. `created_at` is UTC RFC 3339 with seconds precision, no fractional seconds, `Z` suffix (e.g. `2026-08-08T00:00:00Z`); the EIP-712 `createdAt` value is the unix timestamp in seconds of exactly that instant.
+
 **Canonicalization.** The manifest MUST be canonicalized per RFC 8785 (JSON Canonicalization Scheme) before signing or hashing.
 
 ### 3. Merkle commitment
@@ -87,7 +94,7 @@ No odd-leaf duplication is performed. Verifiers MUST recompute the root and reje
 
 `owner_signature` is computed over the canonical manifest with the `owner_signature` field removed. Verifiers MUST implement the `eip-191` suite (the mandatory baseline); the `eip-712` suite is OPTIONAL to implement, but where accepted MUST be verified exactly as specified.
 
-**`eip-191`** — [ERC-191](./eip-191.md) personal-message signing: input `"\x19Ethereum Signed Message:\n" ‖ len(msg) ‖ msg` where `msg` is the canonical manifest JSON; keccak-256; 65-byte `r‖s‖v`. The recovered address MUST equal `subject`.
+**`eip-191`** — [ERC-191](./eip-191.md) personal-message signing: input `"\x19Ethereum Signed Message:\n" ‖ len(msg) ‖ msg` where `msg` is the canonical manifest JSON and `len(msg)` is its byte length rendered in ASCII decimal with no leading zeros; keccak-256; 65-byte `r‖s‖v`. Signatures MUST be low-`s` (`s` at most half the secp256k1 group order) and `v` MUST be `27` or `28`; verifiers MUST reject high-`s` signatures or any other `v` encoding. The recovered address MUST equal `subject`.
 
 **`eip-712`** — [EIP-712](./eip-712.md) typed data, for wallet-inspectable signing:
 
@@ -102,7 +109,7 @@ struct CapsuleCommit {
 }
 ```
 
-Domain: `{ name: "AgentMemoryCapsule", version: "2", chainId, verifyingContract }` where `chainId` and `verifyingContract` MUST equal the manifest's `signature_domain` values (§2) — `verifying_contract` is the anchor registry (§6) or the zero address when unanchored — so verification is reconstructible from the manifest alone. [EIP-712](./eip-712.md) itself provides no replay protection; the `nonce` field and single-use rule above supply it. Verification: an EOA `subject` verifies by `ecrecover` equal to `subject`; a contract `subject` verifies per [EIP-1271](./eip-1271.md) **on the `subject` address itself**.
+Domain: `{ name: "AgentMemoryCapsule", version: "2", chainId, verifyingContract }` where `chainId` and `verifyingContract` MUST equal the manifest's `signature_domain` values (§2) — `verifying_contract` is the anchor registry (§6) or the zero address when unanchored — so verification is reconstructible from the manifest alone. [EIP-712](./eip-712.md) itself provides no replay protection; the `nonce` field and single-use rule above supply it. Verification: an EOA `subject` verifies by `ecrecover` equal to `subject`; a contract `subject` verifies per [ERC-1271](./eip-1271.md) **on the `subject` address itself**.
 
 `CapsuleCommit` is the *signing view* of the manifest, not a separate commitment primitive: `merkleRoot` MUST equal the manifest's `merkle_root` — the same value emitted in `CapsuleAnchored` (§6) — so the signature, the manifest, and the anchor all bind one commitment, and a relying party verifying any one of them is verifying the same tree.
 
@@ -112,8 +119,8 @@ Verifiers MUST reject unknown suite names, and MUST NOT accept a weaker suite th
 
 A memory-rights interface exposing an export operation for `subject` SHOULD satisfy it by returning one of:
 
-1. the Capsule archive bytes;
-2. ABI-encoded `(bytes32 merkleRoot, string uri)` where `uri` resolves to the Capsule.
+1. the canonical Capsule encoding (§1);
+2. ABI-encoded `(bytes32 merkleRoot, string uri)` where `uri` resolves to the canonical Capsule encoding (§1).
 
 A subject's **lineage** is defined as: the set of Capsule states reachable from a given state by transitively following `parent_roots` manifest references, for that subject. Where states are anchored, the `CapsuleAnchored` event graph (§6) is the verifiable projection of that lineage and MUST be consistent with the manifests' `parent_roots`; an inconsistency between the two is grounds for rejecting the Capsule.
 
@@ -181,9 +188,9 @@ This ERC introduces a new format and a new optional registry; it conflicts with 
 
 **Subject-only signing (v1 authorization model).** This version requires the manifest signer to be the `subject` itself because any manifest-listed delegate would be self-authorizing — the manifest naming the delegate is the object the delegate signs, so a forger could list themselves and pass verification. Delegated controllers return only with an externally verifiable authorization proof (e.g. an on-chain delegation registry).
 
-**Encryption envelope.** The payload encryption envelope — algorithm, nonce discipline, DEK wrapping, recipient binding — is implementor-defined in this version. This ERC therefore guarantees **integrity and commitment portability** of Capsules across implementations, not cross-implementation *decryptability*; two conforming implementations can verify each other's Capsules but cannot necessarily decrypt them without sharing an envelope convention. HPKE (RFC 9180) with a hybrid X25519 + ML-KEM-768 KEM is RECOMMENDED; a registered envelope format is planned for a future revision.
+**Encryption envelope.** The payload encryption envelope — algorithm, nonce discipline, DEK wrapping, recipient binding — is implementor-defined in this version. This ERC therefore guarantees **integrity and commitment portability** of Capsules across implementations, not cross-implementation *decryptability*; two conforming implementations can verify each other's Capsules but cannot necessarily decrypt them without sharing an envelope convention. HPKE (RFC 9180) is RECOMMENDED for the envelope. A post-quantum/traditional hybrid KEM profile for HPKE is, at the time of writing, an IETF Internet-Draft rather than a standard; a normative PQ/T profile is therefore deferred until standardization, and a registered envelope format is planned for a future revision.
 
-**Key custody.** The Capsule's confidentiality equals the custody of the subject's decryption keys. Long-lived Capsules SHOULD be encrypted under hybrid classical/post-quantum KEMs; recorded ciphertext is subject to harvest-now-decrypt-later.
+**Key custody and harvest-now-decrypt-later.** The Capsule's confidentiality equals the custody of the subject's decryption keys and the strength of the implementation's envelope. Recorded ciphertext is subject to harvest-now-decrypt-later; producers of long-lived Capsules SHOULD plan migration to a post-quantum hybrid envelope as HPKE PQ/T profiles standardize.
 
 **Replay.** Manifests are single-use via `nonce`; importers MUST reject a previously accepted (`subject`, `nonce`) pair. Anchoring provides ordering evidence but not freshness — verifiers requiring freshness MUST check `created_at` against policy.
 
