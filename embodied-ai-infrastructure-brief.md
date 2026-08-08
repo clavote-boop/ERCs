@@ -9,6 +9,7 @@
 | Status | Research brief — proposals are draft-quality, ready for spec extraction |
 | Rev 2 | Adds Part 4: the local safety kernel (`CAAP-LSC`) and the adversarial-telemetry integrity model |
 | Rev 3 | M1 hardening: event-driven wipe (no challenge-triggered erasure), obligation-keyed cases, typed resolutions + tranched collateral per `m1-failure-state-spec-v0.1.md`; interfaces v0.2 |
+| Rev 4 | M2: `caap-telemetry-v0.1.md` — byte-exact content trees, capture/receipt/terminal/intent CBOR schemas, disclosure bundles, witness attestations |
 | License | CC0, consistent with the rest of the stack |
 
 ---
@@ -482,6 +483,8 @@ If §2.4 settles money on telemetry, spoofing the telemetry is the rational atta
 
 **Honest limit:** none of this makes sensors truthful. It makes honest evidence cheap to produce and verify, and fabricated evidence expensive, multi-party, simulation-grade — and catastrophically slashable when caught. That is the correct security posture for a liability system: preponderance of cryptographically-weighted evidence, with fraud as the dominated strategy.
 
+**Status (Rev 4): drafted.** The byte-exact wire layer for §2.3 and §4 — chunking rules, domain-separated content trees, HLC64 encoding, capture attestations, `IntentPayload`/`ActionReceipt`/`TerminalReceipt` CDDL schemas, the disclosure bundle `respond` commits to (with the validator procedure an ERC-8004 node runs against it), proximity attestations, retention tiers, and codec registry — is specified in `caap-telemetry-v0.1.md` (repo root). Receipts are telemetry records in that spec, so execution evidence inherits chunking, capsule inclusion, and anchoring for free.
+
 ---
 
 ## 5. Composition map
@@ -494,6 +497,7 @@ If §2.4 settles money on telemetry, spoofing the telemetry is the rational atta
 | `LeaseBond` (§2.4) | ERC-8183 state machine; ERC-4337/7702/7579 allowances; L402 tiers; §2.1–2.3 evidence | ERC-8004 reputation; underwriting pools; lessor go/no-go (`x_bond` check) |
 | `CAAP-LSC` (§4) | Gap C `actuate` scopes (envelope compiler); §2.1 enrollment (LSC measurement + key); Gap A tickets; Gap D harness taint stamps | `ActionReceipt` chunks + `TerminalReceipt` → CAAP-TELEMETRY / §2.4.4; mechanical attribution → `LeaseBond`; Safety Kernel Registry → ERC-8004 |
 | `CAAP-TICKET` (Gap A, `caap-ticket-v0.1.md`) | ERC-8269 lease + `ticket_policy`; §2.1 enrollment (BAK, boot counter); `IBodyLeaseSettlement` finalized state | Armed/disarmed input to `CAAP-LSC`; cosign-grant delivery (C3/P3); equivocation evidence → `LeaseBond` |
+| `CAAP-TELEMETRY` wire (M2, `caap-telemetry-v0.1.md`) | MCAP/codecs; sensing/LSC/witness keys; HLC64; obligation IDs (M1) | `disclosureRoot` bundles → `LeaseBond.respond`; receipt batches → `EvidenceRootCommitted`; LossReport roots → destruction claims |
 
 Recommended sequencing: **Gap A's ticket-renewal reframing and §1.2's lease-schema fixes first** (they change ERC-8269 normative text and everything downstream signs lease bytes); then CAAP-WIPE + LeaseBond as one unit (they are economically coupled); CAAP-TELEMETRY and CAAP-LSC together next (receipts are telemetry, and claims can't be adjudicated until both exist — note CAAP-LSC also requires Gap C's `actuate` schema to land in the lease first); CAAP-MERGE last (it extends a wire format that should stabilize after the telemetry profile lands).
 
