@@ -99,6 +99,8 @@ struct CapsuleCommit {
 
 Domain: `{ name: "AgentMemoryCapsule", version: "2", chainId, verifyingContract }` where `verifyingContract` is the anchor registry (§6) or the zero address when unanchored. EIP-712 itself provides no replay protection; the `nonce` field and single-use rule above supply it. Contract-account controllers are verified per [ERC-1271](./eip-1271.md).
 
+`CapsuleCommit` is the *signing view* of the manifest, not a separate commitment primitive: `merkleRoot` MUST equal the manifest's `merkle_root` — the same value emitted in `CapsuleAnchored` (§6) — so the signature, the manifest, and the anchor all bind one commitment, and a relying party verifying any one of them is verifying the same tree.
+
 Verifiers MUST reject unknown suite names, and MUST NOT accept a weaker suite than the strongest previously observed for a subject without explicit operator action.
 
 ### 5. ERC-8264 binding
@@ -108,9 +110,14 @@ An ERC-8264 implementation SHOULD satisfy `exportMemory(subject)` by returning o
 1. the Capsule archive bytes;
 2. ABI-encoded `(bytes32 merkleRoot, string uri)` where `uri` resolves to the Capsule.
 
-`deleteMemory` interacts with lineage: a deletion is reflected in the next export as the record's absence, and importers MUST NOT resurrect a record absent from a descendant Capsule whose ancestry (via `parent_roots`) includes the Capsule that contained it.
+`deleteMemory` interacts with lineage: a deletion is reflected in the next export as the record's absence, and importers MUST NOT resurrect a record absent from a descendant Capsule whose ancestry includes the Capsule that contained it. For this rule, a subject's **lineage** is defined as: the set of Capsule states reachable from a given state by transitively following `parent_roots` manifest references, for that subject. Where states are anchored, the `CapsuleAnchored` event graph (§6) is the verifiable projection of that lineage and MUST be consistent with the manifests' `parent_roots`; an inconsistency between the two is grounds for rejecting the Capsule.
 
-Memory exports MUST NOT contain raw credentials (API keys, private keys, OAuth tokens, or analogous bearer material); entitlement descriptors that record *what* a subject is entitled to, rather than *how* to authenticate, are the permitted alternative. (This restates the Credential Broker rule of the companion body-lease proposal so it binds Capsule producers independently.)
+Memory exports MUST NOT contain raw credentials; entitlement descriptors that record *what* a subject is entitled to, rather than *how* to authenticate, are the permitted alternative. (This restates the Credential Broker rule of the companion body-lease proposal so it binds Capsule producers independently.) The rule is enforced at two testable points:
+
+1. **Producer-side (normative):** the exporting gateway MUST run the credential-exclusion check against record plaintext and metadata *before* encryption — post-encryption, content is unverifiable by design.
+2. **Verifier-side (normative for manifests):** an importer MUST reject a Capsule whose manifest fields, record metadata, or `x_` extensions carry a field name or declared semantic type on the credential deny-list.
+
+The initial normative deny-list: `api_key`, `private_key`, `secret_key`, `seed`, `mnemonic`, `oauth_token`, `refresh_token`, `access_token`, `session_cookie`, `bearer_token`, `macaroon`, `nwc_connection`. Implementations MAY enforce supersets; externally maintained extensions of this list are informative, not normative.
 
 ### 6. Anchoring
 
@@ -162,6 +169,8 @@ Two anchored states sharing a parent are normal concurrency. Verifiers detecting
 This ERC introduces a new format and a new optional registry; it conflicts with no existing ERC. Existing ERC-8264 deployments returning implementor-defined export bytes remain conformant with ERC-8264; adopting this ERC's §5 binding is opt-in. Capsules produced under the pre-standard chain-agnostic v0.1 format differ in tree construction (no domain prefixes) and are distinguished by `capsule_version`; importers MAY accept both during migration but MUST NOT verify a v1 tree under v2 rules or vice versa.
 
 ## Security Considerations
+
+**Merkle construction: leaf/node reinterpretation.** An unprefixed binary Merkle tree admits a second-preimage attack in which a leaf's data, if it equals the 64-byte concatenation of two internal-node hashes, allows the same root to be presented with a different tree interpretation (the class addressed by RFC 6962's structural hashing). The `0x00` leaf / `0x01` node domain prefixes (§3) make leaf and node preimages disjoint, defeating the reinterpretation; the leaf count implied by `record_index` length removes tree-shape ambiguity from duplicated terminal nodes. This is why `capsule_version: "2"` breaks compatibility with the unprefixed v1 construction: the ambiguity is structural, and a standard expected to verify decades of anchored history should not freeze it.
 
 **Key custody.** The Capsule's confidentiality equals the custody of the subject's decryption keys. Long-lived Capsules SHOULD be encrypted under hybrid classical/post-quantum KEMs; recorded ciphertext is subject to harvest-now-decrypt-later.
 
