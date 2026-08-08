@@ -1,74 +1,148 @@
 // SPDX-License-Identifier: CC0-1.0
 pragma solidity ^0.8.24;
 
-/// @title  CAAP-WIPE — attested crypto-erasure for ERC-8269 body leases
-/// @notice Records FACTS about capsule-key destruction; never moves money.
-///         Economic interpretation of these facts (default vs. destruction
-///         vs. lost-in-terrain) belongs to the LeaseBond claim process.
+/// @title  CAAP-WIPE v0.2 — attested crypto-erasure case registry for
+///         ERC-8269 body leases
+/// @notice Records FACTS about capsule-key custody and destruction; never
+///         moves money. Economic interpretation belongs to LeaseBond under
+///         the M1 failure-state spec (m1-failure-state-spec-v0.1.md), whose
+///         lifecycle / evidence / resolution separation this contract's
+///         enums mirror.
 ///
-///         Identity keying, used consistently across CAAP contracts:
-///           leaseId     = keccak256(utf8(lease.lease_id))   — identity key
-///           leaseDigest = keccak256(canonical lease JSON)   — content commitment
+///         Design rules inherited from that spec:
+///         - Key destruction is EVENT-DRIVEN: the body's lease-exit state
+///           machine destroys the LDK after safe state and emits a signed
+///           WipeReceipt at that moment. It never waits for a chain
+///           challenge; an on-chain confirmation request is optional and
+///           addressed only to surviving bodies. (No challenge-triggered
+///           wipe: a disconnected body must not retain data for want of a
+///           chain message, and a body that wipes then dies must remain
+///           provable.)
+///         - Silence is procedural, not probative: markProofUnavailable
+///           records that evidence was not produced. It opens a cure
+///           window; it MUST NOT slash, and it MUST NOT be read as proof
+///           the key survives. (No proof-by-timeout.)
+///         - Verification follows the RATS separation (RFC 9334): vendor
+///           evidence is appraised by an approved verifier module; this
+///           contract stores the Attestation Result binding; LeaseBond
+///           applies lease policy to it.
+///
+///         Keying. Wipe obligations are NOT keyed by lease alone — a proof
+///         for an earlier capsule or revision must never satisfy a
+///         different obligation:
+///           obligationId = keccak256(abi.encode(
+///               leaseId,          // keccak256(utf8(lease.lease_id))
+///               leaseDigest,      // keccak256(canonical lease JSON), revision-exact
+///               bodyId,
+///               capsuleRoot,
+///               mountReceiptHash))
+///
+///         Uniqueness of submissions is enforced on the receipt DIGEST,
+///         never on signature bytes: P-256 ECDSA signatures are malleable
+///         (see EIP-7951 security notes), so signature bytes are not an
+///         identity.
 interface IWipeAttestation {
 
-    enum WipeMethod { KeyDestruction, MediaPurge }
-    enum WipeState  { None, Challenged, Proven, Defaulted }
+    // Mirrors m1-failure-state-spec §2.1 / §2.2.
+    enum CaseState     { None, Bonded, Active, ExitPending, SafeStated,
+                         WipeDue, EvidenceSubmitted, Disputed, Resolved }
+    enum EvidenceState { None, ValidWipeReceipt, ValidDestructionEvidence,
+                         ProofUnavailable, CorrectableInvalid, Contradictory,
+                         FraudEvidence }
 
-    struct WipeStatement {
-        bytes32 leaseId;      // identity key of the lease being closed out
-        bytes32 leaseDigest;  // canonical-lease content commitment (revision-latest)
-        bytes32 bodyId;       // enrolled body
-        bytes32 capsuleRoot;  // CAAP merkle_root whose LDK was destroyed
-        bytes32 challenge;    // freshness nonce from challengeWipe
-        uint64  counter;      // TEE rollback-protected counter, post-destruction
-        uint8   method;       // WipeMethod
+    /// RATS Attestation Result binding (spec §9). resultHash commits to the
+    /// verifier's full appraisal output.
+    struct Appraisal {
+        uint8   verifierId;
+        bytes32 verifierVersion;
+        bytes32 appraisalPolicyHash;
+        bytes32 referenceValueSetHash;
+        bytes32 evidenceHash;
+        bytes32 resultHash;
+        uint64  issuedAt;
+        uint64  expiresAt;
     }
 
-    event BodyRegistered (bytes32 indexed bodyId, bytes32 measurement, uint8 keyType);
-    event WipeChallenged (bytes32 indexed leaseId, bytes32 challenge, uint64 deadline);
-    event WipeProven     (bytes32 indexed leaseId, bytes32 indexed bodyId,
-                          bytes32 capsuleRoot, uint64 counter);
-    event WipeDefaulted  (bytes32 indexed leaseId, bytes32 indexed bodyId);
-    event ZombieDetected (bytes32 indexed leaseId, bytes32 indexed bodyId,
-                          uint64 counter, address reporter);
+    event BodyRegistered        (bytes32 indexed bodyId, bytes32 measurement, uint8 keyType);
+    event MountRecorded         (bytes32 indexed obligationId, bytes32 indexed leaseId,
+                                 bytes32 mountReceiptHash);
+    event HeartbeatRecorded     (bytes32 indexed obligationId, bytes32 heartbeatHash,
+                                 uint64 counter);
+    event SafeStateReported     (bytes32 indexed obligationId, bytes32 receiptHash);
+    event WipeEvidenceSubmitted (bytes32 indexed obligationId, bytes32 evidenceHash);
+    event WipeEvidenceAccepted  (bytes32 indexed obligationId, bytes32 resultHash);
+    event WipeProofUnavailable  (bytes32 indexed obligationId, uint64 cureDeadline);
+    event ConfirmationRequested (bytes32 indexed obligationId, bytes32 nonce);
+    event ContradictionRecorded (bytes32 indexed obligationId, bytes32 evidenceHash,
+                                 address reporter);
 
-    /// @notice One-time body enrollment. `evidence` (TPM EK/AK chain, DCAP
-    ///         quote, Nitro document) is checked by the pluggable verifier
-    ///         module registered under `verifierId`. Caches the body
-    ///         attestation key (BAK) for cheap per-wipe verification.
+    /// @notice One-time body enrollment; evidence checked by the pluggable
+    ///         verifier module for `verifierId` (TPM EK/AK chain, DCAP quote,
+    ///         Nitro document). Caches the body attestation key.
     function registerBody(bytes32 bodyId, uint8 verifierId, bytes calldata evidence) external;
 
-    /// @notice Permissionless once the lease is provably ended: caller supplies
-    ///         the canonical lease JSON; the contract verifies the controller
-    ///         signature and that the lease is expired or revoked (via the
-    ///         settlement contract, if one is named), then emits a fresh
-    ///         challenge and starts the deadline clock.
-    function challengeWipe(bytes calldata canonicalLease) external returns (bytes32 challenge);
+    /// @notice Anchor a TEE-emitted MountReceipt, creating the wipe
+    ///         obligation. Without a recorded mount the lease MUST NOT be
+    ///         treated as Active by relying contracts; a mount invariant
+    ///         discovered false later is MountInvariantBreach, adjudicated
+    ///         in LeaseBond.
+    function recordMount(bytes calldata mountReceipt, bytes calldata sig)
+        external returns (bytes32 obligationId);
 
-    /// @notice TEE-signed statement of key destruction. Signature verified
-    ///         against the enrolled BAK via the P-256 precompile (EIP-7951 /
-    ///         RIP-7212). The statement hash MUST have been embedded in the
-    ///         TEE signing context (TPM2_Quote qualifyingData / SGX
-    ///         report_data / Nitro user_data). Rejects counters not strictly
-    ///         greater than the last recorded counter for the body.
-    function proveWipe(WipeStatement calldata s, bytes calldata sig) external;
+    /// @notice Optional periodic key-custody heartbeat (consequence-class
+    ///         policy dependent). Narrows the unknown interval before a
+    ///         casualty; never exposes the LDK.
+    function recordHeartbeat(bytes32 obligationId, bytes calldata heartbeat,
+                             bytes calldata sig) external;
 
-    /// @notice Anyone may finalize a missed deadline. Records the fact of
-    ///         default only; a missed deadline has innocent explanations
-    ///         (total physical loss) as well as guilty ones, and that
-    ///         adjudication happens in LeaseBond.
-    function defaultWipe(bytes32 leaseId) external;
+    /// @notice Anchor the safe-state receipt that starts the wipe_due clock
+    ///         (spec §4: wipe_due = safe_stated + d_wipe).
+    function reportSafeState(bytes32 obligationId, bytes calldata receipt,
+                             bytes calldata sig) external;
 
-    /// @notice Zombie clause: accepts any artifact validly signed by the
-    ///         lease's enrolled BAK whose embedded counter/boot state
-    ///         postdates the wipe challenge — cryptographic proof the body
-    ///         was alive after its claimed death. Emits ZombieDetected;
-    ///         LeaseBond reads zombieDetected() to slash the holdback and
-    ///         pay the reporter's bounty.
-    function reportProofOfLife(bytes32 leaseId, bytes calldata artifact,
-                               bytes calldata sig) external;
+    /// @notice Submit the event-bound WipeReceipt (spec §3.3): signed by the
+    ///         enrolled body key at destruction time, binding the mount
+    ///         receipt, pre/post rollback-protected counters, firmware
+    ///         measurement, boot counter, and safe-state receipt. Appraised
+    ///         by the verifier module; on acceptance the case resolves
+    ///         toward TimelyWipe/LateWipe* in LeaseBond. Signature verified
+    ///         via the P-256 precompile (EIP-7951 / RIP-7212); replay
+    ///         rejected on receipt digest and counter monotonicity.
+    function submitWipeEvidence(bytes32 obligationId, bytes calldata wipeReceipt,
+                                bytes calldata sig) external;
 
-    function wipeState(bytes32 leaseId) external view returns (WipeState);
-    function isWipeProven(bytes32 leaseId) external view returns (bool);
-    function zombieDetected(bytes32 leaseId) external view returns (bool, address reporter);
+    /// @notice Submit destruction evidence for a casualty case (LossReport
+    ///         root and verifier appraisal of physical non-recoverability).
+    ///         Whether it amounts to QualifiedCasualty is LeaseBond's
+    ///         policy decision, not this contract's.
+    function submitDestructionEvidence(bytes32 obligationId, bytes calldata evidence)
+        external;
+
+    /// @notice OPTIONAL liveness prod addressed to surviving bodies — a
+    ///         fresh nonce the body MAY answer with a supplementary signed
+    ///         confirmation. MUST NOT be the only admissible proof and MUST
+    ///         NOT gate acceptance of an event-bound WipeReceipt.
+    function requestConfirmation(bytes32 obligationId) external returns (bytes32 nonce);
+
+    /// @notice Records that evidence was not produced by evidence_due.
+    ///         Procedural: opens the cure window, transfers nothing,
+    ///         asserts nothing about key survival. Only an authenticated
+    ///         operator submission history plus an expired cure window can
+    ///         support a noncooperation resolution in LeaseBond.
+    function markProofUnavailable(bytes32 obligationId) external;
+
+    /// @notice Record contradiction evidence: counter rollback, accepted
+    ///         post-wipe or post-loss use of the same LDK lineage or body
+    ///         session, or attestation-key equivocation. Verified against
+    ///         the enrolled key and stored counters; subsumes the zombie
+    ///         clause (a post-claimed-death signature is one contradiction
+    ///         class). Reporter identity is recorded for LeaseBond's
+    ///         bounty payment.
+    function reportContradiction(bytes32 obligationId, bytes calldata artifact,
+                                 bytes calldata sig) external;
+
+    function caseState(bytes32 obligationId) external view returns (CaseState);
+    function evidenceState(bytes32 obligationId) external view returns (EvidenceState);
+    function appraisal(bytes32 obligationId) external view returns (Appraisal memory);
+    function contradictionReporter(bytes32 obligationId) external view returns (address);
 }

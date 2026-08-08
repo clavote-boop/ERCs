@@ -8,6 +8,7 @@
 | Scope | ERC-8264 · ERC-8269 · CAAP-Capsule v0.1 · CAAP-ROBOTID v1.1 · WebMCP |
 | Status | Research brief — proposals are draft-quality, ready for spec extraction |
 | Rev 2 | Adds Part 4: the local safety kernel (`CAAP-LSC`) and the adversarial-telemetry integrity model |
+| Rev 3 | M1 hardening: event-driven wipe (no challenge-triggered erasure), obligation-keyed cases, typed resolutions + tranched collateral per `m1-failure-state-spec-v0.1.md`; interfaces v0.2 |
 | License | CC0, consistent with the rest of the stack |
 
 ---
@@ -82,86 +83,59 @@ Verifying a full attestation chain on-chain is expensive (a raw Intel DCAP quote
 
 #### 2.1.3 Interface
 
+> **Rev 3 design correction.** Earlier revisions of this section made the on-chain challenge *trigger* the wipe and bound the proof to a chain-issued nonce. That was wrong twice over: a disconnected body would retain data while waiting for a chain message it may never receive, and a body that wiped correctly and was then destroyed before any challenge could never prove it. The corrected model (below, and normatively in `m1-failure-state-spec-v0.1.md`) makes key destruction **event-driven** — the body's lease-exit state machine reaches its certified safe state, destroys the LDK, and emits a signed `WipeReceipt` *at that moment*, persisted off-body whenever connectivity allows. Freshness comes from the TEE's rollback-protected counters, boot counter, and the receipt's binding to the `MountReceipt` and safe-state receipt — not from chain interaction. An on-chain confirmation request exists but is an optional liveness prod for surviving bodies, never the admissible proof.
+
+The v0.2 interface (full source: `assets/erc-8269/IWipeAttestation.sol`) is a **case registry**, mirroring the failure-state spec's three separated dimensions — lifecycle state, evidence state, resolution — with obligations keyed narrowly so a proof can never satisfy the wrong bond:
+
 ```solidity
-// SPDX-License-Identifier: CC0-1.0
-pragma solidity ^0.8.24;
+obligationId = keccak256(abi.encode(
+    leaseId,          // identity: keccak256(lease.lease_id)
+    leaseDigest,      // content: keccak256(canonical lease JSON), revision-exact
+    bodyId, capsuleRoot, mountReceiptHash));
 
-/// @title CAAP-WIPE — attested crypto-erasure for ERC-8269 body leases
 interface IWipeAttestation {
+    enum CaseState     { None, Bonded, Active, ExitPending, SafeStated,
+                         WipeDue, EvidenceSubmitted, Disputed, Resolved }
+    enum EvidenceState { None, ValidWipeReceipt, ValidDestructionEvidence,
+                         ProofUnavailable, CorrectableInvalid, Contradictory,
+                         FraudEvidence }
 
-    enum WipeMethod { KeyDestruction, MediaPurge }   // 0 = crypto-erase (default)
-
-    struct WipeStatement {
-        bytes32 leaseId;      // keccak256 of canonical lease JSON (revision-latest)
-        bytes32 bodyId;       // enrolled body
-        bytes32 capsuleRoot;  // CAAP merkle_root whose LDK was destroyed
-        bytes32 challenge;    // freshness nonce from challengeWipe
-        uint64  counter;      // TEE rollback-protected counter, post-destruction
-        uint8   method;       // WipeMethod
-    }
-
-    event BodyRegistered (bytes32 indexed bodyId, bytes32 measurement, uint8 keyType);
-    event WipeChallenged (bytes32 indexed leaseId, bytes32 challenge, uint64 deadline);
-    event WipeProven     (bytes32 indexed leaseId, bytes32 indexed bodyId,
-                          bytes32 capsuleRoot, uint64 counter);
-    event WipeDefaulted  (bytes32 indexed leaseId, bytes32 indexed bodyId);
-
-    /// One-time enrollment. `evidence` is verified by the verifier module
-    /// registered for `verifierId` (DCAP, Nitro doc, TPM EK/AK chain, ...).
     function registerBody(bytes32 bodyId, uint8 verifierId, bytes calldata evidence) external;
-
-    /// Permissionless once the lease is provably ended: caller supplies the
-    /// canonical lease JSON; the contract verifies the EIP-191 owner signature
-    /// and that expires_at < block.timestamp (or that a higher-revision
-    /// revocation exists). Emits a fresh challenge and starts the clock.
-    function challengeWipe(bytes calldata canonicalLease) external returns (bytes32 challenge);
-
-    /// TEE-signed statement; sig verified against the enrolled BAK via the
-    /// P-256 precompile (EIP-7951 / RIP-7212). Statement hash MUST have been
-    /// embedded in the TEE signing context (TPM2_Quote qualifyingData /
-    /// SGX report_data / Nitro user_data).
-    function proveWipe(WipeStatement calldata s, bytes calldata sig) external;
-
-    /// Anyone may finalize a missed deadline. Records the FACT of default;
-    /// economic consequences are adjudicated in LeaseBond (§2.4.4), because a
-    /// missed deadline has innocent explanations (total loss) as well as
-    /// guilty ones.
-    function defaultWipe(bytes32 leaseId) external;
-
-    /// Read-only oracle for LeaseBond's release gate.
-    function isWipeProven(bytes32 leaseId) external view returns (bool);
-
-    /// Zombie clause (§2.4.4): anyone presenting an artifact validly signed by
-    /// the lease's enrolled body key with counter/boot state postdating the
-    /// wipe challenge proves the body outlived its claimed death. Emits
-    /// ZombieDetected; LeaseBond slashes the holdback, reporter takes a bounty.
-    function reportProofOfLife(bytes32 leaseId, bytes calldata artifact,
-                               bytes calldata sig) external;
+    function recordMount(bytes calldata mountReceipt, bytes calldata sig)
+        external returns (bytes32 obligationId);   // no mount, no Active lease
+    function recordHeartbeat(bytes32 obligationId, bytes calldata hb, bytes calldata sig) external;
+    function reportSafeState(bytes32 obligationId, bytes calldata receipt, bytes calldata sig) external;
+    function submitWipeEvidence(bytes32 obligationId, bytes calldata wipeReceipt,
+                                bytes calldata sig) external;   // event-bound, P-256 via EIP-7951
+    function submitDestructionEvidence(bytes32 obligationId, bytes calldata evidence) external;
+    function requestConfirmation(bytes32 obligationId) external returns (bytes32 nonce); // optional
+    function markProofUnavailable(bytes32 obligationId) external; // procedural: opens cure, never slashes
+    function reportContradiction(bytes32 obligationId, bytes calldata artifact,
+                                 bytes calldata sig) external;   // rollback, post-loss key use, equivocation
 }
 ```
 
 Notes on the mechanics:
 
-- **Freshness:** the challenge nonce defeats replay of an old "clean" statement; the monotonic counter defeats rollback of TEE state to a pre-wipe snapshot. Both are required.
-- **Off-chain lease, on-chain teeth.** `challengeWipe` demonstrates a nice property of ERC-8269's design: because the lease is canonical JSON with an EIP-191 signature, *any* lease can be verified on-chain from its bytes when a dispute needs it — the lease stays off-chain for the happy path and becomes on-chain evidence on demand. (Deployments using the on-chain `grantLease` path in `RmemMemoryRegistry` can check expiry directly instead.)
-- **Composition:** `WipeProven` is the release condition for the §2.4 bond; `WipeDefaulted` slashes it and SHOULD post to the ERC-8004 Validation Registry so reputation systems see hygiene failures. The Credential Broker's revocation duty is unchanged — credentials die at lease end *regardless* of wipe status (belt), the wipe proof covers the capsule (suspenders).
+- **Timing model** (spec §4): `safe_state_due = t_auth_end + d_mrc`; `wipe_due = safe_stated + d_wipe`; `evidence_due = wipe_due + d_submit`. Chain or verifier outages may toll `d_submit` (bounded, with objective outage evidence) but never postpone local safe-state or key destruction.
+- **Silence is procedural.** `markProofUnavailable` records that evidence wasn't produced — it opens a cure window and transfers nothing. Silence proves non-production of evidence, not survival of a key; only affirmative fraud or unresolved non-cooperation after cure justifies a penalty (no proof-by-timeout).
+- **Verification follows RATS** (RFC 9334): vendor evidence → approved verifier module → Attestation Result (binding verifier version, appraisal-policy hash, reference values) → LeaseBond applies lease policy. Verifier unavailability, negative appraisal, and policy rejection stay distinguishable. Receipt uniqueness is enforced on the receipt *digest*, never signature bytes — P-256 ECDSA is malleable (EIP-7951 notes).
+- **Composition:** an accepted wipe receipt resolves the §2.4 bond toward `TimelyWipe`/`LateWipe*`; contradictions (counter rollback, post-loss use of the key lineage — the zombie clause is one class) re-resolve to `DeliberateRetention`/`AttestationEquivocation` and slash. Credential Broker revocation is unchanged: credentials die at lease end regardless of wipe status.
 
 ```mermaid
 sequenceDiagram
-    participant Soul as Soul / controller
     participant Chain as WipeAttestation (EVM)
-    participant Body as Body TEE
+    participant Body as Body TEE / LSC
     Note over Body,Chain: once per body
-    Body->>Chain: registerBody(evidence: DCAP/Nitro/TPM chain)
-    Note over Soul,Body: mount (lease start)
-    Soul->>Body: DEKs wrapped to TEE-resident LDK (HPKE)
-    Note over Soul,Chain: lease ends / is revoked
-    Soul->>Chain: challengeWipe(canonical lease)
-    Chain-->>Body: WipeChallenged(nonce, deadline)
-    Body->>Body: destroy LDK seed, ++counter
-    Body->>Chain: proveWipe(statement, P-256 sig)
-    Chain-->>Soul: WipeProven → bond releasable
-    Note over Chain: deadline missed → WipeDefaulted → slash + ERC-8004 entry
+    Body->>Chain: registerBody(evidence)
+    Note over Body,Chain: lease start
+    Body->>Chain: recordMount(MountReceipt) → obligationId
+    Note over Body: authority ends (ticket non-renewal)
+    Body->>Body: minimal-risk trajectory → safe state
+    Body->>Body: destroy LDK, ++counter, sign WipeReceipt
+    Body-->>Chain: reportSafeState / submitWipeEvidence (when connected)
+    Chain-->>Chain: verifier appraisal → EvidenceAccepted → bond resolvable
+    Note over Chain: no evidence by evidence_due → markProofUnavailable → cure window → LeaseBond adjudicates
 ```
 
 #### 2.1.4 Honest limits (to be stated in the spec's security section)
@@ -341,13 +315,15 @@ One bond, enumerated fault classes — `WipeDefault` (§2.1) and `Equivocation` 
 
 A body dropped into a volcano cannot prove it wiped its key — the TEE died with the LDK inside it. Under a naive `release`-requires-`WipeProven` gate, catastrophic hardware loss triggers `WipeDefault` and slashes the subject for an event that may be nobody's fault — and, ironically, one in which the *security* objective was achieved by physics: a destroyed TEE **is** a destroyed key. The fix decouples the security question ("is the key dead?") from the economic question ("whose fault is the hardware loss?"), with three additions:
 
-**1. The destruction claim.** `Fault.Destruction` joins the enum, with a parallel entry point `destructionClaim(bondId, terminalEvidenceRoot, incidentHlc)`. Evidence, in descending weight: the LSC's **TerminalReceipt** — a signed last-gasp record the kernel writes to its ring buffer on detecting an unrecoverable condition (impact beyond certified limits, thermal runaway, power loss outside the expected window), the robotic black-box ping (added to §4.4's loop as a terminal state); witness chunks from bodies and infrastructure in the overlapping `geo_cells`; salvage documentation attested off-chain to the arbiter. The arbiter runs the §4.6 attribution table on the pre-destruction telemetry: subject drove it off the cliff → slash as damage award to the lessor; battery defect → no slash, lessor-side reputation entry; act of God or third party → split per lease terms or absorbed by the underwriting pool. The release gate becomes `isWipeProven(leaseId) OR destructionResolved`. A destruction claim with *no* evidence — no terminal receipt, no witnesses, no salvage — earns adverse inference and is treated as `WipeDefault`.
+**1. The destruction claim.** `Fault.Destruction` joins the enum, with a parallel entry point `destructionClaim(bondId, terminalEvidenceRoot, incidentHlc)`. Evidence, in descending weight: the LSC's **TerminalReceipt** — a signed last-gasp record the kernel writes to its ring buffer on detecting an unrecoverable condition (impact beyond certified limits, thermal runaway, power loss outside the expected window), the robotic black-box ping (added to §4.4's loop as a terminal state); witness chunks from bodies and infrastructure in the overlapping `geo_cells`; salvage documentation attested off-chain to the arbiter. The arbiter runs the §4.6 attribution table on the pre-destruction telemetry: subject drove it off the cliff → slash as damage award to the lessor; battery defect → no slash, lessor-side reputation entry; act of God or third party → split per lease terms or absorbed by the underwriting pool. The release gate becomes: claim window closed, no unresolved claims, all awards executed, and the bond's *exact* obligation resolved as `TimelyWipe`/`LateWipe*` or `QualifiedCasualty` — a typed resolution code bound to evidence root and policy version, not a boolean an arbiter can flip to bypass the security gate. A destruction claim with *no* evidence — no terminal receipt, no witnesses, no salvage — resolves as `UnprovenLoss` (a predetermined evidence-reserve payout with adjudicated allocation), hardening to `OperatorNonCooperation` (policy-capped slash) only after a cure window expires without cooperation. Destruction is an *incident kind*, never itself a fault: physical loss alone does not establish data death (secure elements survive impacts; a faulty mount may have leaked the LDK beforehand), so `QualifiedCasualty` additionally requires a valid pre-loss `MountReceipt`, key-custody evidence within policy, independent corroboration (no self-witnessed C2/C3 casualties), and no accepted post-loss use of the key lineage.
 
 **2. The zombie clause — because the chain cannot see a volcano.** From on-chain, "destroyed" and "stolen, powered down, and being decapped in a lab" are the same observation: silence plus a story. So `destructionResolved` is an *economic* resolution, never a confidentiality proof, and it must be falsifiable retroactively: any artifact validly signed by the body's enrolled key with a counter or boot state postdating the wipe challenge is **proof of life** — cryptographic evidence the death was staged. To give that teeth after funds move, `release` pays out minus a **zombie holdback** (a lease-policy fraction retained for an extended window); proof of life during the window slashes the holdback, pays the reporter a bounty (the world hunts zombies for profit), and posts a permanent ERC-8004 entry. After a quiet window, the holdback returns. The genuinely-lost-with-no-evidence case — no witnesses, no terminal receipt, power simply cut — resolves through the same mechanism as arbiter policy: a time-locked partial settlement rather than an immediate full slash, with the holdback covering the confidentiality tail.
 
 **3. The subject's residual duty.** Because destruction is unprovable, any non-`WipeProven` resolution obligates the subject to treat the lease's mounted subset as *potentially exposed*: rotate key epochs for go-forward capsule state, and re-evaluate anything secret that was in scope. This is also the economic argument for **scope-minimal mounts** — mount only what the mission needs, so a silent body's maximum exposure is one mission's context, not a lifetime of memory. Underwriters should price mount scope accordingly.
 
-One separation of concerns makes all of this compose cleanly: **CAAP-WIPE records facts; LeaseBond adjudicates money.** `WipeDefaulted` on the attestation contract is evidence that no proof arrived — not an automatic slash. All economic interpretation (default vs. destruction vs. lost-in-terrain) happens in the bond's claim process, which is where evidence, fault, and arbiter judgment already live. This also removes any need for cross-contract deadline suspension while a destruction claim is being adjudicated.
+One separation of concerns makes all of this compose cleanly: **CAAP-WIPE records facts; LeaseBond adjudicates money.** `WipeProofUnavailable` on the attestation contract is evidence that no proof arrived — not an automatic slash. All economic interpretation (default vs. destruction vs. lost-in-terrain) happens in the bond's claim process, which is where evidence, fault, and resolver judgment already live.
+
+**Rev 3:** this subsection's semantics are now normative in `m1-failure-state-spec-v0.1.md` (repo root), which supersedes the sketch above where they differ: the three separated dimensions (lifecycle / evidence / resolution), the `ClaimKind` vs `ResolutionCode` split, the timing model with bounded tolling, the qualified-casualty predicates, **tranched collateral** (`performanceBond` / `evidenceReserve` / `casualtyReserve` / `challengeBond` — so a no-fault casualty is never treated like deliberate retention), the settlement matrix, and twelve required conformance scenarios. The zombie holdback survives as the contradiction window on released performance-bond funds; `reportContradiction` (counter rollback, post-loss key use, equivocation) is its trigger, with the reporter bounty intact. One open M1 item the spec correctly flags: ERC-8004's validation registry records validator requests/responses but defines no resolver incentives, quorum, appeals, or stake — the bond's named `IResolutionModule` must specify those, and that module is now the remaining unwritten piece of M1. Interfaces v0.2 at `assets/erc-8269/`.
 
 #### 2.4.3 Funding-side composition (delegated collateral)
 
