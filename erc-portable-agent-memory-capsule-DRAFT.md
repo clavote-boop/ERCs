@@ -8,7 +8,7 @@ status: Draft
 type: Standards Track
 category: ERC
 created: 2026-08-08
-requires: 8264
+requires: 191, 712, 1271, 8264
 ---
 
 ## Abstract
@@ -76,7 +76,7 @@ leaf_i = SHA-256( 0x00 ‖ record_id_i ‖ payload_hash_i )
 node   = SHA-256( 0x01 ‖ left ‖ right )
 ```
 
-Leaves in `record_index` order; odd levels duplicate the last node; the empty index's root is `SHA-256(0x00)`. Verifiers MUST recompute the root and reject mismatches. The `0x00`/`0x01` prefixes prevent leaf/node second-preimage confusion; the leaf count is implicit in `record_index` length and MUST be used to disambiguate duplicated terminal nodes in proofs.
+All operands are raw bytes: `record_id_i` and `payload_hash_i` are the 32-byte values whose lowercase `0x`-prefixed hex renderings appear in the manifest (65-byte leaf preimage; 65-byte node preimage). Leaves in `record_index` order; odd levels duplicate the last node; the empty index's root is `SHA-256(0x00)`. Verifiers MUST recompute the root and reject mismatches. The `0x00`/`0x01` prefixes prevent leaf/node second-preimage confusion; the leaf count is implicit in `record_index` length and MUST be used to disambiguate duplicated terminal nodes in proofs.
 
 ### 4. Signature suites
 
