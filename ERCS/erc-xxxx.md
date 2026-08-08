@@ -1,5 +1,5 @@
 ---
-eip: 8331
+eip: XXXX
 title: Portable Agent Memory Capsule
 description: A canonical, subject-signed, Merkle-committed payload format for AI agent memory export, with an on-chain anchoring event.
 author: Clavote (@clavote-boop)
@@ -8,18 +8,18 @@ status: Draft
 type: Standards Track
 category: ERC
 created: 2026-08-08
-requires: 191, 712, 1271, 8264
+requires: 191, 712, 1271
 ---
 
 ## Abstract
 
-This ERC defines the **Capsule**: a canonical, content-addressed, subject-signed bundle carrying an AI agent's memory records across implementations, hosts, and platforms. It specifies the manifest schema and canonicalization, a domain-separated Merkle commitment over encrypted record payloads, two Ethereum signature suites, a binding to [ERC-8264](./eip-8264.md) `exportMemory`, and an on-chain anchoring event through which a Capsule's Merkle root — and optionally its lineage — is committed to an EVM chain.
+This ERC defines the **Capsule**: a canonical, content-addressed, subject-signed bundle carrying an AI agent's memory records across implementations, hosts, and platforms. It specifies the manifest schema and canonicalization, a domain-separated Merkle commitment over encrypted record payloads, two Ethereum signature suites, an export binding for agent-memory rights interfaces, and an on-chain anchoring event through which a Capsule's Merkle root — and optionally its lineage — is committed to an EVM chain.
 
 This ERC is the Ethereum profile of a deliberately chain-agnostic format: the same manifest may also be signed and anchored under non-EVM conventions maintained in a superset registry outside the Ethereum standards track (see Rationale). Everything needed to produce and verify a Capsule on Ethereum is normatively contained in this document.
 
 ## Motivation
 
-[ERC-8264](./eip-8264.md) grants a subject the right to export the memory an agent holds about them, but leaves the export payload implementor-defined. Without a standard payload, portability is nominal: a subject can extract bytes but cannot carry them to another platform, verify their integrity independently, or prove afterward what state existed at a point in time.
+Agent-memory rights interfaces give a subject the right to export the memory an agent holds about them, but leave the export payload implementor-defined. Without a standard payload, portability is nominal: a subject can extract bytes but cannot carry them to another platform, verify their integrity independently, or prove afterward what state existed at a point in time.
 
 A standard Capsule format provides:
 
@@ -58,11 +58,11 @@ A Capsule is a directory or archive containing:
 }
 ```
 
-- `subject` is the ERC-8264 subject address, lowercase hex.
+- `subject` is the Ethereum address asserting rights over the memory (for deployments using an on-chain memory-rights interface, its subject address), lowercase hex.
 - `controllers`: in this version, MUST contain exactly one entry equal to `subject`. Delegated controllers are deliberately deferred: a manifest-listed controller would be self-authorizing (the manifest that names the controller is the very object the controller signs), so honoring one requires an externally verifiable authorization proof — e.g. an on-chain delegation registry entry — which a future revision may define. The array form is retained for that forward compatibility only.
 - `signature_domain` (REQUIRED when `signature_suite` is `eip-712`, absent otherwise): `{ "chain_id": 1, "verifying_contract": "0x…" }` — the exact EIP-712 domain values used, so any third-party verifier can reconstruct the signed domain from the manifest alone.
 - `nonce` MUST be unique per (`subject`, `merkle_root`) and makes signed manifests single-use.
-- `record_id` is the ERC-8264 `bytes32` record identifier; `payload_hash` is the SHA-256 hash of the on-disk **ciphertext** of that record. Plaintext is never hashed, and decryption keys MUST NOT be included in the Capsule.
+- `record_id` is a `bytes32` record identifier; `payload_hash` is the SHA-256 hash of the on-disk **ciphertext** of that record. Plaintext is never hashed, and decryption keys MUST NOT be included in the Capsule.
 - `parent_roots` (OPTIONAL) lists the `merkle_root` values of predecessor Capsule states, forming a lineage DAG. An empty or absent list denotes a genesis export.
 - Extension fields prefixed `x_` MAY be included; importers MUST NOT reject a Capsule solely for unrecognized `x_` fields.
 
@@ -85,7 +85,7 @@ No odd-leaf duplication is performed. Verifiers MUST recompute the root and reje
 
 ### 4. Signature suites
 
-`owner_signature` is computed over the canonical manifest with the `owner_signature` field removed.
+`owner_signature` is computed over the canonical manifest with the `owner_signature` field removed. Verifiers MUST implement the `eip-191` suite (the mandatory baseline); the `eip-712` suite is OPTIONAL to implement, but where accepted MUST be verified exactly as specified.
 
 **`eip-191`** — [ERC-191](./eip-191.md) personal-message signing: input `"\x19Ethereum Signed Message:\n" ‖ len(msg) ‖ msg` where `msg` is the canonical manifest JSON; keccak-256; 65-byte `r‖s‖v`. The recovered address MUST equal `subject`.
 
@@ -108,9 +108,9 @@ Domain: `{ name: "AgentMemoryCapsule", version: "2", chainId, verifyingContract 
 
 Verifiers MUST reject unknown suite names, and MUST NOT accept a weaker suite than the strongest previously observed for a subject without explicit operator action.
 
-### 5. ERC-8264 binding
+### 5. Export binding
 
-An ERC-8264 implementation SHOULD satisfy `exportMemory(subject)` by returning one of:
+A memory-rights interface exposing an export operation for `subject` SHOULD satisfy it by returning one of:
 
 1. the Capsule archive bytes;
 2. ABI-encoded `(bytes32 merkleRoot, string uri)` where `uri` resolves to the Capsule.
@@ -145,8 +145,8 @@ interface ICapsuleAnchor {
                           bytes32 parentRoot);
 
     /// @notice MUST revert unless msg.sender is the subject or an authorized
-    ///         controller (authorization model per the implementation's
-    ///         ERC-8264 conventions).
+    ///         controller (authorization model implementation-defined;
+    ///         subject-only in the absence of a delegation registry).
     function anchor(address subject, bytes32 merkleRoot,
                     bytes32[] calldata parentRoots) external;
 
@@ -173,7 +173,7 @@ Two anchored states sharing a parent are normal concurrency. Verifiers detecting
 
 ## Backwards Compatibility
 
-This ERC introduces a new format and a new optional registry; it conflicts with no existing ERC. Existing ERC-8264 deployments returning implementor-defined export bytes remain conformant with ERC-8264; adopting this ERC's §5 binding is opt-in. Capsules produced under the pre-standard chain-agnostic v0.1 format differ in tree construction (unprefixed, duplicate-last vs. this ERC's RFC 9162 MTH) and are distinguished by `capsule_version`; importers MAY accept both during migration but MUST NOT verify a v1 tree under v2 rules or vice versa.
+This ERC introduces a new format and a new optional registry; it conflicts with no existing ERC. Existing agent-memory deployments returning implementor-defined export bytes are unaffected; adopting this ERC's §5 binding is opt-in. Capsules produced under the pre-standard chain-agnostic v0.1 format differ in tree construction (unprefixed, duplicate-last vs. this ERC's RFC 9162 MTH) and are distinguished by `capsule_version`; importers MAY accept both during migration but MUST NOT verify a v1 tree under v2 rules or vice versa.
 
 ## Security Considerations
 
@@ -189,7 +189,7 @@ This ERC introduces a new format and a new optional registry; it conflicts with 
 
 **Metadata leakage.** Even without plaintext, `record_index` size, record identifiers, and anchoring cadence reveal activity patterns. Producers SHOULD elide non-essential metadata and MAY coarsen anchoring cadence where the subject's operational privacy warrants.
 
-**Deletion finality.** Anchored roots are permanent; deletion (§5) removes payloads from descendant Capsules but cannot remove historical commitments. Producers MUST NOT anchor anything that must later be erasable — a hash commitment to ciphertext is the maximum permissible on-chain residue, consistent with ERC-8264's deletion-finality guidance.
+**Deletion finality.** Anchored roots are permanent; deletion (§5) removes payloads from descendant Capsules but cannot remove historical commitments. Producers MUST NOT anchor anything that must later be erasable — a hash commitment to ciphertext is the maximum permissible on-chain residue.
 
 **Suite downgrade and controller substitution.** See §4: no silent suite downgrades; controllers are verified strictly under the suite that names them.
 
