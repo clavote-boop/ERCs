@@ -59,7 +59,8 @@ A Capsule is a directory or archive containing:
 ```
 
 - `subject` is the ERC-8264 subject address, lowercase hex.
-- `controllers` lists addresses authorized to sign manifests for the subject; the first entry is the active owner.
+- `controllers`: in this version, MUST contain exactly one entry equal to `subject`. Delegated controllers are deliberately deferred: a manifest-listed controller would be self-authorizing (the manifest that names the controller is the very object the controller signs), so honoring one requires an externally verifiable authorization proof — e.g. an on-chain delegation registry entry — which a future revision may define. The array form is retained for that forward compatibility only.
+- `signature_domain` (REQUIRED when `signature_suite` is `eip-712`, absent otherwise): `{ "chain_id": 1, "verifying_contract": "0x…" }` — the exact EIP-712 domain values used, so any third-party verifier can reconstruct the signed domain from the manifest alone.
 - `nonce` MUST be unique per (`subject`, `merkle_root`) and makes signed manifests single-use.
 - `record_id` is the ERC-8264 `bytes32` record identifier; `payload_hash` is the SHA-256 hash of the on-disk **ciphertext** of that record. Plaintext is never hashed, and decryption keys MUST NOT be included in the Capsule.
 - `parent_roots` (OPTIONAL) lists the `merkle_root` values of predecessor Capsule states, forming a lineage DAG. An empty or absent list denotes a genesis export.
@@ -69,22 +70,26 @@ A Capsule is a directory or archive containing:
 
 ### 3. Merkle commitment
 
-`merkle_root` commits to the ordered `record_index` with a domain-separated binary tree:
+`record_index` MUST be sorted ascending by `record_id` (byte-wise) and MUST NOT contain duplicate `record_id` entries; verifiers MUST reject manifests violating either rule.
+
+`merkle_root` is the RFC 9162 Merkle Tree Hash (`MTH`) over the entries of `record_index`, where entry *i* is the 64-byte concatenation `record_id_i ‖ payload_hash_i` (raw bytes — the 32-byte values whose lowercase `0x`-prefixed hex renderings appear in the manifest):
 
 ```
-leaf_i = SHA-256( 0x00 ‖ record_id_i ‖ payload_hash_i )
-node   = SHA-256( 0x01 ‖ left ‖ right )
+MTH({})    = SHA-256("")
+MTH([e])   = SHA-256( 0x00 ‖ e )
+MTH(D[n])  = SHA-256( 0x01 ‖ MTH(D[0:k]) ‖ MTH(D[k:n]) ),
+             k = largest power of two < n
 ```
 
-All operands are raw bytes: `record_id_i` and `payload_hash_i` are the 32-byte values whose lowercase `0x`-prefixed hex renderings appear in the manifest (65-byte leaf preimage; 65-byte node preimage). Leaves in `record_index` order; odd levels duplicate the last node; the empty index's root is `SHA-256(0x00)`. Verifiers MUST recompute the root and reject mismatches. The `0x00`/`0x01` prefixes prevent leaf/node second-preimage confusion; the leaf count is implicit in `record_index` length and MUST be used to disambiguate duplicated terminal nodes in proofs.
+No odd-leaf duplication is performed. Verifiers MUST recompute the root and reject mismatches. Inclusion proofs follow RFC 9162 §2.1.3.
 
 ### 4. Signature suites
 
 `owner_signature` is computed over the canonical manifest with the `owner_signature` field removed.
 
-**`eip-191`** — [ERC-191](./eip-191.md) personal-message signing: input `"\x19Ethereum Signed Message:\n" ‖ len(msg) ‖ msg` where `msg` is the canonical manifest JSON; keccak-256; 65-byte `r‖s‖v`. The recovered address MUST be a listed controller.
+**`eip-191`** — [ERC-191](./eip-191.md) personal-message signing: input `"\x19Ethereum Signed Message:\n" ‖ len(msg) ‖ msg` where `msg` is the canonical manifest JSON; keccak-256; 65-byte `r‖s‖v`. The recovered address MUST equal `subject`.
 
-**`eip-712`** — [ERC-712](./eip-712.md) typed data, for wallet-inspectable signing:
+**`eip-712`** — [EIP-712](./eip-712.md) typed data, for wallet-inspectable signing:
 
 ```solidity
 struct CapsuleCommit {
@@ -97,7 +102,7 @@ struct CapsuleCommit {
 }
 ```
 
-Domain: `{ name: "AgentMemoryCapsule", version: "2", chainId, verifyingContract }` where `verifyingContract` is the anchor registry (§6) or the zero address when unanchored. ERC-712 itself provides no replay protection; the `nonce` field and single-use rule above supply it. Contract-account controllers are verified per [ERC-1271](./eip-1271.md).
+Domain: `{ name: "AgentMemoryCapsule", version: "2", chainId, verifyingContract }` where `chainId` and `verifyingContract` MUST equal the manifest's `signature_domain` values (§2) — `verifying_contract` is the anchor registry (§6) or the zero address when unanchored — so verification is reconstructible from the manifest alone. [EIP-712](./eip-712.md) itself provides no replay protection; the `nonce` field and single-use rule above supply it. Verification: an EOA `subject` verifies by `ecrecover` equal to `subject`; a contract `subject` verifies per [EIP-1271](./eip-1271.md) **on the `subject` address itself**.
 
 `CapsuleCommit` is the *signing view* of the manifest, not a separate commitment primitive: `merkleRoot` MUST equal the manifest's `merkle_root` — the same value emitted in `CapsuleAnchored` (§6) — so the signature, the manifest, and the anchor all bind one commitment, and a relying party verifying any one of them is verifying the same tree.
 
@@ -110,7 +115,9 @@ An ERC-8264 implementation SHOULD satisfy `exportMemory(subject)` by returning o
 1. the Capsule archive bytes;
 2. ABI-encoded `(bytes32 merkleRoot, string uri)` where `uri` resolves to the Capsule.
 
-`deleteMemory` interacts with lineage: a deletion is reflected in the next export as the record's absence, and importers MUST NOT resurrect a record absent from a descendant Capsule whose ancestry includes the Capsule that contained it. For this rule, a subject's **lineage** is defined as: the set of Capsule states reachable from a given state by transitively following `parent_roots` manifest references, for that subject. Where states are anchored, the `CapsuleAnchored` event graph (§6) is the verifiable projection of that lineage and MUST be consistent with the manifests' `parent_roots`; an inconsistency between the two is grounds for rejecting the Capsule.
+A subject's **lineage** is defined as: the set of Capsule states reachable from a given state by transitively following `parent_roots` manifest references, for that subject. Where states are anchored, the `CapsuleAnchored` event graph (§6) is the verifiable projection of that lineage and MUST be consistent with the manifests' `parent_roots`; an inconsistency between the two is grounds for rejecting the Capsule.
+
+Deletion semantics across lineage are deliberately **not** defined by absence in this version: a record missing from a descendant Capsule may reflect a partial export, branch concurrency, or filtering — not deletion — so importers MUST NOT infer deletion from absence, and no resurrection rule is imposed. Enforceable cross-lineage deletion requires explicit tombstone records and full-snapshot markers, deferred to a future revision.
 
 Memory exports MUST NOT contain raw credentials; entitlement descriptors that record *what* a subject is entitled to, rather than *how* to authenticate, are the permitted alternative. (This restates the Credential Broker rule of the companion body-lease proposal so it binds Capsule producers independently.) The rule is enforced at two testable points:
 
@@ -162,15 +169,19 @@ Two anchored states sharing a parent are normal concurrency. Verifiers detecting
 
 **Why ciphertext-only commitment.** Committing plaintext hashes would leak confirmation-of-content (an observer holding a guessed plaintext could confirm it against the manifest). Ciphertext hashing plus subject-held keys keeps the manifest safe to publish and anchor.
 
-**Why two suites.** `eip-191` matches deployed gateway practice; `eip-712` gives human-verifiable signing in wallets and native contract-account support via ERC-1271. Registering both with a no-downgrade rule serves both machine and human signing paths.
+**Why two suites.** `eip-191` matches deployed gateway practice; `eip-712` gives human-verifiable signing in wallets and native contract-account support via EIP-1271. Registering both with a no-downgrade rule serves both machine and human signing paths.
 
 ## Backwards Compatibility
 
-This ERC introduces a new format and a new optional registry; it conflicts with no existing ERC. Existing ERC-8264 deployments returning implementor-defined export bytes remain conformant with ERC-8264; adopting this ERC's §5 binding is opt-in. Capsules produced under the pre-standard chain-agnostic v0.1 format differ in tree construction (no domain prefixes) and are distinguished by `capsule_version`; importers MAY accept both during migration but MUST NOT verify a v1 tree under v2 rules or vice versa.
+This ERC introduces a new format and a new optional registry; it conflicts with no existing ERC. Existing ERC-8264 deployments returning implementor-defined export bytes remain conformant with ERC-8264; adopting this ERC's §5 binding is opt-in. Capsules produced under the pre-standard chain-agnostic v0.1 format differ in tree construction (unprefixed, duplicate-last vs. this ERC's RFC 9162 MTH) and are distinguished by `capsule_version`; importers MAY accept both during migration but MUST NOT verify a v1 tree under v2 rules or vice versa.
 
 ## Security Considerations
 
-**Merkle construction: leaf/node reinterpretation.** An unprefixed binary Merkle tree admits a second-preimage attack in which a leaf's data, if it equals the 64-byte concatenation of two internal-node hashes, allows the same root to be presented with a different tree interpretation (the class addressed by RFC 6962's structural hashing). The `0x00` leaf / `0x01` node domain prefixes (§3) make leaf and node preimages disjoint, defeating the reinterpretation; the leaf count implied by `record_index` length removes tree-shape ambiguity from duplicated terminal nodes. This is why `capsule_version: "2"` breaks compatibility with the unprefixed v1 construction: the ambiguity is structural, and a standard expected to verify decades of anchored history should not freeze it.
+**Merkle construction: leaf/node reinterpretation.** An unprefixed binary Merkle tree admits a second-preimage attack in which a leaf's data, if it equals the 64-byte concatenation of two internal-node hashes, allows the same root to be presented with a different tree interpretation. The RFC 9162 construction (§3) defeats this with disjoint `0x00` leaf / `0x01` node preimages, and its fixed split rule (largest power of two) makes tree shape a pure function of entry count — no duplication, no shape ambiguity. This is why `capsule_version: "2"` breaks compatibility with the unprefixed, duplicate-last v1 construction: the ambiguity is structural, and a standard expected to verify decades of anchored history should not freeze it.
+
+**Subject-only signing (v1 authorization model).** This version requires the manifest signer to be the `subject` itself because any manifest-listed delegate would be self-authorizing — the manifest naming the delegate is the object the delegate signs, so a forger could list themselves and pass verification. Delegated controllers return only with an externally verifiable authorization proof (e.g. an on-chain delegation registry).
+
+**Encryption envelope.** The payload encryption envelope — algorithm, nonce discipline, DEK wrapping, recipient binding — is implementor-defined in this version. This ERC therefore guarantees **integrity and commitment portability** of Capsules across implementations, not cross-implementation *decryptability*; two conforming implementations can verify each other's Capsules but cannot necessarily decrypt them without sharing an envelope convention. HPKE (RFC 9180) with a hybrid X25519 + ML-KEM-768 KEM is RECOMMENDED; a registered envelope format is planned for a future revision.
 
 **Key custody.** The Capsule's confidentiality equals the custody of the subject's decryption keys. Long-lived Capsules SHOULD be encrypted under hybrid classical/post-quantum KEMs; recorded ciphertext is subject to harvest-now-decrypt-later.
 
