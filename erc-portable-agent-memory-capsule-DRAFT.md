@@ -23,7 +23,7 @@ Agent-memory rights interfaces give a subject the right to export the memory an 
 
 A standard Capsule format provides:
 
-- **Portability** — any conforming gateway can import another's export;
+- **Portability** — any conforming gateway can parse and verify another's export;
 - **Integrity** — a Merkle commitment allows any record to be verified against the manifest, and the manifest against an on-chain anchor, without trusting the exporting platform;
 - **Auditability** — anchored roots with parent links give an agent's memory a verifiable history, usable in dispute contexts;
 - **Ciphertext-only commitment** — the manifest commits to ciphertext and carries no keys. What this ERC guarantees is commitment integrity over encrypted payloads; confidentiality itself is a property of the implementation's encryption envelope, not of this format.
@@ -63,15 +63,15 @@ where `canonicalManifest` is the RFC 8785 canonical manifest bytes (§2) and `ci
 
 - `subject` is the Ethereum address asserting rights over the memory (for deployments using an on-chain memory-rights interface, its subject address), lowercase hex.
 - `controllers`: in this version, MUST contain exactly one entry equal to `subject`. Delegated controllers are deliberately deferred: a manifest-listed controller would be self-authorizing (the manifest that names the controller is the very object the controller signs), so honoring one requires an externally verifiable authorization proof — e.g. an on-chain delegation registry entry — which a future revision may define. The array form is retained for that forward compatibility only.
-- `signature_domain` (REQUIRED when `signature_suite` is `eip-712`, absent otherwise): `{ "chain_id": 1, "verifying_contract": "0x…" }` — the exact EIP-712 domain values used, so any third-party verifier can reconstruct the signed domain from the manifest alone.
-- `nonce` MUST be unique per (`subject`, `merkle_root`) and makes signed manifests single-use.
+- `signature_domain` (REQUIRED when `signature_suite` is `eip-712`, absent otherwise): `{ "chain_id": "1", "verifying_contract": "0x…" }` — the exact [EIP-712](./eip-712.md) domain values used, so any third-party verifier can reconstruct the signed domain from the manifest alone.
+- `nonce` MUST never be reused by the same `subject` across any manifests; it makes each signed manifest single-use.
 - `record_id` is a `bytes32` record identifier; `payload_hash` is the SHA-256 hash of the on-disk **ciphertext** of that record. Plaintext is never hashed, and decryption keys MUST NOT be included in the Capsule.
 - `parent_roots` (OPTIONAL) lists the `merkle_root` values of predecessor Capsule states, forming a lineage DAG. An empty or absent list denotes a genesis export.
 - Extension fields prefixed `x_` MAY be included; importers MUST NOT reject a Capsule solely for unrecognized `x_` fields.
 
-**Closed schema.** The manifest's fields are exactly: REQUIRED `capsule_version`, `subject`, `controllers`, `created_at`, `nonce`, `signature_suite`, `record_index`, `merkle_root`, `owner_signature`; OPTIONAL `parent_roots`; `signature_domain` per its rule above; plus `x_`-prefixed extensions. Verifiers MUST reject a manifest containing any other field.
+**Closed schema.** The manifest's fields are exactly: REQUIRED `capsule_version`, `subject`, `controllers`, `created_at`, `nonce`, `signature_suite`, `record_index`, `merkle_root`, `owner_signature`; OPTIONAL `parent_roots`; `signature_domain` per its rule above; plus `x_`-prefixed extensions. Verifiers MUST reject a manifest containing any other field. Nested objects are equally closed: `capsule_version` MUST equal `"2"`; `signature_suite` MUST equal `"eip-191"` or `"eip-712"`; each `record_index` entry contains exactly `record_id` and `payload_hash`; `signature_domain` contains exactly `chain_id` and `verifying_contract`. Verifiers MUST reject any other value or nested field.
 
-**Exact encodings.** `nonce`, `merkle_root`, every `record_id` and `payload_hash`, and every `parent_roots` entry are exactly 32 bytes, rendered as `0x` followed by 64 lowercase hex characters; `subject` and `verifying_contract` are 20 bytes as `0x` + 40 lowercase hex. Verifiers MUST reject other lengths or uppercase hex. `parent_roots` MUST be sorted ascending byte-wise and MUST NOT contain duplicates. `created_at` is UTC RFC 3339 with seconds precision, no fractional seconds, `Z` suffix (e.g. `2026-08-08T00:00:00Z`); the EIP-712 `createdAt` value is the unix timestamp in seconds of exactly that instant.
+**Exact encodings.** `nonce`, `merkle_root`, every `record_id` and `payload_hash`, and every `parent_roots` entry are exactly 32 bytes, rendered as `0x` followed by 64 lowercase hex characters; `subject` and `verifying_contract` are 20 bytes as `0x` + 40 lowercase hex. Verifiers MUST reject other lengths or uppercase hex. `parent_roots` MUST be sorted ascending byte-wise and MUST NOT contain duplicates. `created_at` is UTC RFC 3339 with seconds precision, no fractional seconds, `Z` suffix (e.g. `2026-08-08T00:00:00Z`); the EIP-712 `createdAt` value is the unix timestamp in seconds of exactly that instant. `chain_id` is a canonical decimal string — digits only, no leading zeros except `"0"` — parsed as a `uint256` (a JSON number cannot safely carry the full `uint256` range under RFC 8785). `owner_signature` is lowercase `0x`-prefixed even-length hex: for EOA subjects under either suite it is exactly 65 bytes (`r‖s‖v`, low-`s`, `v` ∈ {27, 28}); for contract subjects under `eip-712` it is arbitrary-length signature bytes passed unchanged to `isValidSignature`.
 
 **Canonicalization.** The manifest MUST be canonicalized per RFC 8785 (JSON Canonicalization Scheme) before signing or hashing.
 
@@ -176,7 +176,7 @@ Two anchored states sharing a parent are normal concurrency. Verifiers detecting
 
 **Why ciphertext-only commitment.** Committing plaintext hashes would leak confirmation-of-content (an observer holding a guessed plaintext could confirm it against the manifest). Ciphertext hashing plus subject-held keys keeps the manifest safe to publish and anchor.
 
-**Why two suites.** `eip-191` matches deployed gateway practice; `eip-712` gives human-verifiable signing in wallets and native contract-account support via EIP-1271. Registering both with a no-downgrade rule serves both machine and human signing paths.
+**Why two suites.** `eip-191` matches deployed gateway practice; `eip-712` gives human-verifiable signing in wallets and native contract-account support via ERC-1271. Registering both with a no-downgrade rule serves both machine and human signing paths.
 
 ## Backwards Compatibility
 
